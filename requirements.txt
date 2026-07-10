@@ -1,0 +1,8 @@
+pypdf
+sentence-transformers
+anthropic
+streamlit
+
+# Optional later stage:
+# fastapi
+# uvicorn
