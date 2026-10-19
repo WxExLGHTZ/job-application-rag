@@ -1,11 +1,3 @@
----
-title: Anforderungs-Check (Deploy-Test)
-sdk: gradio
-sdk_version: "6.30.0"
-python_version: "3.11"
-app_file: app.py
----
-
 # Job Application Copilot
 
 A local RAG (Retrieval-Augmented Generation) tool that matches a job posting
