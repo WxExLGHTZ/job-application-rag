@@ -17,7 +17,7 @@ _DEFAULT_INDEX: "ProfileIndex | None" = None
 @lru_cache(maxsize=1)
 def get_embedding_model() -> SentenceTransformer:
     """Load and cache the sentence-transformers model once per Python process."""
-    return SentenceTransformer(MODEL_NAME)
+    return SentenceTransformer(MODEL_NAME, device="cpu")
 
 
 def embed_texts(texts: list[str]) -> np.ndarray:
