@@ -75,7 +75,7 @@ class ProfileIndex:
             top_k: Number of best matching chunks to return.
 
         Returns:
-            Matching chunks with filename, text, and cosine score.
+            Matching chunks with ID, filename, text, cosine score and page (from 1).
         """
         if top_k <= 0 or not self.chunks:
             return []
@@ -97,8 +97,10 @@ class ProfileIndex:
             chunk = self.chunks[int(index)]
             results.append(
                 {
+                    "chunk_id": chunk["chunk_id"],
                     "filename": chunk["filename"],
                     "text": chunk["text"],
+                    "page": chunk["page"],
                     "score": float(scores[int(index)]),
                 }
             )

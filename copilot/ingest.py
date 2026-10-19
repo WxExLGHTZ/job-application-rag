@@ -1,7 +1,9 @@
 """PDF loading and text extraction for the profile knowledge base."""
 
+import logging
 import re
 import warnings
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -13,10 +15,106 @@ GRADE_RE = re.compile(r"\b(?:[1-4],[037]|mit Erfolg|mE)\b", re.IGNORECASE)
 MODULE_STATUS_RE = re.compile(r"\bBE\b.*\b(?:PF|WP)\b|\b(?:PF|WP)\b")
 CREDITS_RE = re.compile(r"/\s*\d+\s+(?P<credits>\d+)\s+(?P<kind>PF|WP)\b")
 MIN_MODULE_LINES_FOR_TABLE = 3
+MAX_PAGES = 15
+MAX_CHARACTERS = 60_000
+MIN_TEXT_CHARACTERS = 100
+MIN_TEXT_PER_PAGE = 30
+
+# pypdf-Diagnosen können Fragmente beschädigter Dokumente enthalten.
+# Eigene Fehler werden unten ohne fremde Exception-Texte gemeldet.
+_pdf_logger = logging.getLogger("pypdf")
+_pdf_logger.addHandler(logging.NullHandler())
+_pdf_logger.propagate = False
 
 
 class PdfExtractionError(ValueError):
     """Raised when a PDF cannot be read or does not contain extractable text."""
+
+
+class PdfWithoutText(PdfExtractionError):
+    """Das PDF hat zu wenig extrahierbaren Text für eine verlässliche Analyse."""
+
+
+class DocumentTooLong(PdfExtractionError):
+    """Das PDF überschreitet die Seiten- oder Zeichengrenze."""
+
+
+def extract_pages_from_pdf(data: bytes) -> list[dict[str, Any]]:
+    """Lese PDF-Bytes ohne Dateien und liefere geprüfte Seitentexte mit page ab 1.
+
+    Annahme: Weniger als 100 Nicht-Leerraumzeichen insgesamt oder im Schnitt
+    weniger als 30 pro Seite deuten auf eine fehlende/unzureichende Textschicht.
+    Auch leere Seiten zählen bei Seitenlimit und Durchschnitt mit.
+    """
+    if not isinstance(data, bytes):
+        raise PdfExtractionError("Bitte das PDF als Bytes übergeben.")
+    try:
+        with BytesIO(data) as stream:
+            reader = PdfReader(stream)
+            pages = _read_pdf_pages(reader, enforce_limits=True)
+    except PdfExtractionError:
+        raise
+    except Exception as error:
+        raise PdfExtractionError(
+            f"PDF konnte nicht gelesen werden ({type(error).__name__})."
+        ) from None
+
+    text_characters = sum(
+        sum(not char.isspace() for char in page["text"]) for page in pages
+    )
+    if (
+        text_characters < MIN_TEXT_CHARACTERS
+        or text_characters < MIN_TEXT_PER_PAGE * len(pages)
+    ):
+        raise PdfWithoutText(
+            "Das PDF enthält zu wenig lesbaren Text. Es könnte ein gescanntes PDF "
+            "sein. Bitte ein PDF mit Textschicht verwenden (gegebenenfalls vorher OCR ausführen)."
+        )
+    return pages
+
+
+def build_page_chunks(
+    pages: list[dict[str, Any]], filename: str = "profile.pdf"
+) -> list[dict[str, Any]]:
+    """Chunke Seitentexte einzeln; jeder Chunk behält seine ursprüngliche Seite."""
+    chunks: list[dict[str, Any]] = []
+    for page in pages:
+        for text, kind in _chunk_document(page["text"]):
+            chunks.append({
+                "chunk_id": len(chunks),
+                "filename": filename,
+                "page": page["page"],
+                "text": text,
+                "kind": kind,
+            })
+    return chunks
+
+
+def _read_pdf_pages(reader: PdfReader, *, enforce_limits: bool) -> list[dict[str, Any]]:
+    num_pages = len(reader.pages)
+    if enforce_limits and num_pages > MAX_PAGES:
+        raise DocumentTooLong(f"Das PDF darf höchstens {MAX_PAGES} Seiten enthalten.")
+    if num_pages == 0:
+        raise PdfWithoutText("Das PDF enthält keine Seiten und keinen lesbaren Text.")
+
+    pages: list[dict[str, Any]] = []
+    num_characters = 0
+    for page_number, page in enumerate(reader.pages, start=1):
+        try:
+            text = page.extract_text() or ""
+        except Exception as error:
+            raise PdfExtractionError(
+                f"PDF-Seite {page_number} konnte nicht gelesen werden "
+                f"({type(error).__name__})."
+            ) from None
+        # Vor strip() zählen, damit Leerraum das Größenlimit nicht umgehen kann.
+        num_characters += len(text)
+        if enforce_limits and num_characters > MAX_CHARACTERS:
+            raise DocumentTooLong(
+                "Das PDF darf höchstens 60.000 extrahierte Zeichen enthalten."
+            )
+        pages.append({"page": page_number, "text": text.strip()})
+    return pages
 
 
 def extract_text_from_pdf(path: str | Path) -> str:
@@ -44,7 +142,7 @@ def load_profile(profile_dir: str | Path = "profile") -> list[dict[str, Any]]:
 
     Returns:
         A list of dictionaries, one per successfully read PDF, with filename,
-        text, num_pages, and num_chars. Broken or unreadable PDFs are skipped
+        text, pages, num_pages, and num_chars. Broken or unreadable PDFs are skipped
         with a warning.
     """
     directory = Path(profile_dir)
@@ -58,7 +156,8 @@ def load_profile(profile_dir: str | Path = "profile") -> list[dict[str, Any]]:
     documents: list[dict[str, Any]] = []
     for pdf_path in sorted(directory.glob("*.pdf")):
         try:
-            text, num_pages = _extract_pdf_text_and_page_count(pdf_path)
+            pages = _load_pdf_pages(pdf_path)
+            text = "\n\n".join(page["text"] for page in pages if page["text"])
         except PdfExtractionError as error:
             warnings.warn(f"Ueberspringe {pdf_path.name}: {error}", stacklevel=2)
             continue
@@ -67,7 +166,8 @@ def load_profile(profile_dir: str | Path = "profile") -> list[dict[str, Any]]:
             {
                 "filename": pdf_path.name,
                 "text": text,
-                "num_pages": num_pages,
+                "pages": pages,
+                "num_pages": len(pages),
                 "num_chars": len(text),
             }
         )
@@ -133,21 +233,14 @@ def build_chunks(profile_dir: str | Path = "profile") -> list[dict[str, Any]]:
         profile_dir: Directory that contains profile PDFs.
 
     Returns:
-        A list of dictionaries with chunk_id, filename, text, and kind.
+        A list of dictionaries with chunk_id, filename, page, text, and kind.
     """
     documents = load_profile(profile_dir)
     chunks: list[dict[str, Any]] = []
 
     for document in documents:
-        for chunk, kind in _chunk_document(document["text"]):
-            chunks.append(
-                {
-                    "chunk_id": len(chunks),
-                    "filename": document["filename"],
-                    "text": chunk,
-                    "kind": kind,
-                }
-            )
+        for chunk in build_page_chunks(document["pages"], document["filename"]):
+            chunks.append({**chunk, "chunk_id": len(chunks)})
 
     return chunks
 
@@ -319,6 +412,12 @@ def _should_join_previous_module_line(previous_line: str, current_line: str) -> 
 
 
 def _extract_pdf_text_and_page_count(path: str | Path) -> tuple[str, int]:
+    pages = _load_pdf_pages(path)
+    text = "\n\n".join(page["text"] for page in pages if page["text"])
+    return text, len(pages)
+
+
+def _load_pdf_pages(path: str | Path) -> list[dict[str, Any]]:
     pdf_path = Path(path)
     if not pdf_path.exists():
         raise PdfExtractionError(f"Datei nicht gefunden: {pdf_path}")
@@ -326,33 +425,16 @@ def _extract_pdf_text_and_page_count(path: str | Path) -> tuple[str, int]:
         raise PdfExtractionError(f"Pfad ist keine Datei: {pdf_path}")
 
     try:
-        reader = PdfReader(str(pdf_path))
+        with pdf_path.open("rb") as stream:
+            pages = _read_pdf_pages(PdfReader(stream), enforce_limits=False)
+    except PdfExtractionError:
+        raise
     except Exception as error:
         raise PdfExtractionError(
-            f"PDF konnte nicht gelesen werden ({type(error).__name__}: {error})"
-        ) from error
+            f"PDF konnte nicht gelesen werden ({type(error).__name__})."
+        ) from None
 
-    num_pages = len(reader.pages)
-    if num_pages == 0:
-        raise PdfExtractionError("PDF enthaelt keine Seiten.")
-
-    page_texts: list[str] = []
-    for page_number, page in enumerate(reader.pages, start=1):
-        try:
-            page_text = page.extract_text()
-        except Exception as error:
-            warnings.warn(
-                f"Seite {page_number} in {pdf_path.name} konnte nicht gelesen "
-                f"werden und wird uebersprungen ({type(error).__name__}: {error}).",
-                stacklevel=2,
-            )
-            continue
-
-        if page_text:
-            page_texts.append(page_text.strip())
-
-    text = "\n\n".join(page_text for page_text in page_texts if page_text)
-    if not text:
+    if not any(page["text"] for page in pages):
         raise PdfExtractionError("PDF enthaelt keinen extrahierbaren Text.")
 
-    return text, num_pages
+    return pages

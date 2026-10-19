@@ -1,39 +1,54 @@
-"""RAG pipeline that connects requirement extraction, retrieval, and assessment."""
+"""RAG-Analyse zweier PDF-Uploads, ausschließlich im Arbeitsspeicher."""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-from copilot.index import retrieve
-from copilot.llm import assess_requirements, extract_requirements
+from copilot.index import ProfileIndex, embed_texts
+from copilot.ingest import build_page_chunks, extract_pages_from_pdf
+from copilot.llm import TokenUsage, assess_requirements, extract_requirements
 
 
-def analyze_job_ad(job_ad_text: str, top_k: int = 5) -> dict[str, Any]:
-    """Analyze one job ad against the profile knowledge base.
+TOP_K = 5
 
-    Args:
-        job_ad_text: Full text of the job ad.
-        top_k: Number of profile chunks to retrieve per requirement.
 
-    Returns:
-        The final Claude assessment as a JSON-compatible dictionary.
+def analyze(
+    doc_requirements: bytes,
+    doc_profile: bytes,
+    mode: Literal["job", "tender"],
+) -> dict[str, Any]:
+    """Prüfe Anforderungs-PDF gegen Profil-PDF; liefere Bewertung und API-Verbrauch.
+
+    Beide Dokumente werden vor Embeddings/API-Aufrufen geprüft. Der Profilindex
+    und die Verbrauchszähler gehören nur zu diesem Aufruf. Nur das CPU-Modell
+    wird prozessweit wiederverwendet; Dokumente werden nicht gespeichert.
     """
-    if not job_ad_text.strip():
-        raise ValueError("Die Stellenanzeige ist leer.")
-    if top_k <= 0:
-        raise ValueError("top_k muss groesser als 0 sein.")
+    if mode not in ("job", "tender"):
+        raise ValueError("Der Modus muss 'job' oder 'tender' sein.")
 
-    requirements = extract_requirements(job_ad_text)
-    requirements_with_context: list[dict[str, Any]] = []
+    requirement_pages = extract_pages_from_pdf(doc_requirements)
+    profile_pages = extract_pages_from_pdf(doc_profile)
+    chunks = build_page_chunks(profile_pages)
+    index = ProfileIndex(chunks, embed_texts([chunk["text"] for chunk in chunks]))
+    requirement_text = "\n\n".join(page["text"] for page in requirement_pages)
 
-    for requirement in requirements:
-        requirement_text = str(requirement["requirement"]).strip()
-        matching_chunks = retrieve(requirement_text, top_k=top_k)
-        requirements_with_context.append(
-            {
-                **requirement,
-                "retrieved_chunks": matching_chunks,
-            }
-        )
+    extraction_usage = TokenUsage()
+    assessment_usage = TokenUsage()
+    requirements = extract_requirements(requirement_text, mode, usage=extraction_usage)
+    requirements_with_context = [
+        {
+            **requirement,
+            "retrieved_chunks": index.retrieve(requirement["requirement"], top_k=TOP_K),
+        }
+        for requirement in requirements
+    ]
+    result = assess_requirements(requirements_with_context, mode, usage=assessment_usage)
 
-    return assess_requirements(requirements_with_context)
+    extraction = extraction_usage.to_dict()
+    assessment = assessment_usage.to_dict()
+    result["usage"] = {
+        "extract": extraction,
+        "assess": assessment,
+        "total": {key: extraction[key] + assessment[key] for key in extraction},
+    }
+    return result
