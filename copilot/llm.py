@@ -15,6 +15,9 @@ from copilot.schema import AssessmentResponse, ExtractedRequirement
 
 
 DEFAULT_MODEL = "claude-haiku-5-5"
+# Niedrigste getestete Einstellung; Schema-Prüfung und Korrekturversuch bleiben aktiv.
+MODEL_EFFORT = "low"
+THINKING_TYPE = "disabled"
 MAX_TOKENS = 16000
 REQUEST_TOKEN_LIMIT = 100_000
 TOKEN_SAFETY_MARGIN = 4096
@@ -193,7 +196,8 @@ erfuellt: Die Anforderung ist vollständig belegt. teilweise: Nur ein Teil ist
 belegt. nicht_belegt: Es gibt keinen ausreichenden Nachweis.
 Bei erfuellt/teilweise ist ein Beleg erforderlich: ein zusammenhängender,
 wörtlicher Ausschnitt aus genau einem Chunk, ohne Auslassungspunkte oder
-zusammengesetzte Textstellen. Nenne die Seite (page) dieses Chunks als seite.
+zusammengesetzte Textstellen. Zitate enden an einem Satz-, Aufzählungs- oder
+Feldende, nicht mitten im Satz. Nenne die Seite (page) dieses Chunks als seite.
 Bei nicht_belegt ist beleg null. Begründe jede Bewertung in einem kurzen Satz.
 Liefere ausschließlich JSON mit Bewertungen und einem Fazit von ein bis zwei Sätzen:
 {
@@ -293,6 +297,8 @@ def _send_message(
     try:
         response = _get_client().messages.create(
             model=model,
+            output_config={"effort": MODEL_EFFORT},
+            thinking={"type": THINKING_TYPE},
             max_tokens=MAX_TOKENS,
             timeout=API_TIMEOUT_SECONDS,
             system=system_prompt,
