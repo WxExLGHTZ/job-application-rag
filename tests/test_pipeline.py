@@ -103,6 +103,46 @@ def test_documents_checked_before_embedding_or_api(pdf_bytes, monkeypatch):
     forbidden.assert_not_called()
 
 
+def test_progress_matches_actual_pipeline_steps(pdf_bytes, offline_embeddings, monkeypatch):
+    events = []
+    original_read = pipeline.extract_pages_from_pdf
+    original_retrieve = index.ProfileIndex.retrieve
+
+    def read(data):
+        events.append("read")
+        return original_read(data)
+
+    def extract(*args, **kwargs):
+        events.append("extract")
+        return [{"id": "R1", "text": "Python", "typ": "muss"}]
+
+    def retrieve(self, *args, **kwargs):
+        events.append("retrieve")
+        return original_retrieve(self, *args, **kwargs)
+
+    def assess(*args, **kwargs):
+        events.append("assess")
+        return {"fazit": "Kein Beleg.", "requirements": [
+            {"id": "R1", "status": "nicht_belegt", "beleg": None, "begruendung": "Kein Beleg"},
+        ]}
+
+    monkeypatch.setattr(pipeline, "extract_pages_from_pdf", read)
+    monkeypatch.setattr(pipeline, "extract_requirements", extract)
+    monkeypatch.setattr(index.ProfileIndex, "retrieve", retrieve)
+    monkeypatch.setattr(pipeline, "assess_requirements", assess)
+    document = pdf_bytes(["Python Anforderung " * 20])
+    pipeline.analyze(document, document, "job", on_progress=events.append)
+    assert events == ["text", "read", "read", "requirements", "extract",
+                      "evidence", "retrieve", "assessment", "assess"]
+
+
+def test_progress_stops_after_bad_pdf(pdf_bytes):
+    events = []
+    with pytest.raises(ingest.PdfWithoutText):
+        pipeline.analyze(pdf_bytes([""]), pdf_bytes([""]), "job", on_progress=events.append)
+    assert events == ["text"]
+
+
 def test_cli_reads_bytes_and_prints_only_json(pdf_bytes, monkeypatch, capsys):
     data = pdf_bytes(["Anforderungen " * 20])
     monkeypatch.setattr(cli.Path, "read_bytes", lambda self: data)

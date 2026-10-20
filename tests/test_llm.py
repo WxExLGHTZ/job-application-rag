@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
-from anthropic import Anthropic
+from anthropic import Anthropic, APIConnectionError, APIStatusError, APITimeoutError
 
 from copilot import llm
 
@@ -158,6 +158,47 @@ def test_api_error_is_sanitized(messages):
         llm.extract_requirements("SQL")
     assert "PRIVATE_PROMPT_AND_KEY" not in str(error.value)
     assert error.value.__suppress_context__
+
+
+@pytest.mark.parametrize("status,message,reason", [
+    (429, "PRIVATE", "rate_limit"),
+    (400, "PRIVATE Your credit balance is too low", "spending_limit"),
+    (400, "PRIVATE spend limit reached", "spending_limit"),
+    (402, "PRIVATE", "spending_limit"),
+    (401, "PRIVATE", "authentication"),
+    (403, "PRIVATE", "authentication"),
+    (413, "PRIVATE", "request_too_large"),
+    (504, "PRIVATE", "timeout"),
+    (529, "PRIVATE", "unavailable"),
+    (500, "PRIVATE", "unavailable"),
+    (400, "PRIVATE invalid request", "api"),
+])
+def test_api_status_classification_preserves_no_provider_content(messages, status, message, reason):
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    messages.create.side_effect = APIStatusError(
+        message, response=httpx.Response(status, request=request),
+        body={"error": {"message": message}},
+    )
+    with pytest.raises(llm.LlmApiError) as error:
+        llm.extract_requirements("SQL")
+    assert error.value.reason == reason
+    assert "PRIVATE" not in str(error.value)
+    assert error.value.__suppress_context__
+
+
+@pytest.mark.parametrize("kind,reason", [(APITimeoutError, "timeout"), (APIConnectionError, "connection")])
+def test_connection_error_classification(messages, kind, reason):
+    messages.create.side_effect = kind(request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+    with pytest.raises(llm.LlmApiError) as error:
+        llm.extract_requirements("SQL")
+    assert error.value.reason == reason
+
+
+def test_output_token_limit_retains_response_retry(messages):
+    messages.create.return_value = response("", stop_reason="max_tokens")
+    with pytest.raises(llm.OutputTokenLimit):
+        llm.extract_requirements("SQL")
+    assert messages.create.call_count == 2
 
 
 @pytest.mark.parametrize("key", [None, "", "   "])

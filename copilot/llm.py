@@ -8,7 +8,7 @@ import os
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Literal
 
-from anthropic import Anthropic
+from anthropic import Anthropic, APIConnectionError, APIStatusError, APITimeoutError
 from pydantic import TypeAdapter, ValidationError
 
 from copilot.schema import AssessmentResponse, ExtractedRequirement
@@ -50,6 +50,44 @@ class LlmResponseError(LlmError):
 
 class RequestTooLarge(LlmError):
     """Das konservativ geschätzte Budget der Anfrage ist zu groß."""
+
+
+class LlmApiError(LlmError):
+    """API-Fehler mit inhaltsfreiem Grund für die Oberfläche."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(f"Claude API nicht verfügbar ({reason}).")
+
+
+class OutputTokenLimit(LlmResponseError):
+    """Die Antwort wurde am Ausgabetokenlimit abgeschnitten."""
+
+
+def _api_error_reason(error: APIStatusError) -> str:
+    """Klassifiziere Anbieterfehler, ohne deren Text oder Antwort weiterzugeben."""
+    if error.status_code == 429:
+        return "rate_limit"
+    if error.status_code in (401, 403):
+        return "authentication"
+    if error.status_code in (408, 504):
+        return "timeout"
+    if error.status_code == 413:
+        return "request_too_large"
+    if error.status_code >= 500:
+        return "unavailable"
+    # Anthropic meldet fehlendes Guthaben/Ausgabenlimits teils als HTTP 400.
+    body = error.body if isinstance(error.body, dict) else {}
+    detail = body.get("error", body)
+    message = detail.get("message", "") if isinstance(detail, dict) else ""
+    if error.status_code == 402 or (
+        isinstance(message, str) and any(term in message.casefold() for term in (
+            "credit balance", "insufficient credits", "spend limit",
+            "spending limit", "usage limit", "billing", "purchase credits",
+        ))
+    ):
+        return "spending_limit"
+    return "api"
 
 
 @dataclass
@@ -306,6 +344,12 @@ def _send_message(
         )
     except MissingApiKeyError:
         raise
+    except APITimeoutError:
+        raise LlmApiError("timeout") from None
+    except APIConnectionError:
+        raise LlmApiError("connection") from None
+    except APIStatusError as error:
+        raise LlmApiError(_api_error_reason(error)) from None
     except Exception as error:
         raise LlmError(
             f"Claude API-Aufruf fehlgeschlagen ({type(error).__name__})."
@@ -317,7 +361,7 @@ def _send_message(
 
     stop_reason = getattr(response, "stop_reason", None)
     if stop_reason == "max_tokens":
-        raise LlmResponseError(
+        raise OutputTokenLimit(
             "Antwort wurde wegen Token-Limit abgeschnitten, erhöhe MAX_TOKENS."
         )
 

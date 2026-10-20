@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from copilot.index import ProfileIndex, embed_texts
 from copilot.ingest import build_page_chunks, extract_pages_from_pdf
@@ -12,6 +12,7 @@ from copilot.schema import AnalysisResult, Requirement, Summary
 
 
 TOP_K = 5
+ProgressStage = Literal["text", "requirements", "evidence", "assessment"]
 
 
 def normalize_quote(text: str) -> str:
@@ -67,6 +68,8 @@ def analyze(
     doc_requirements: bytes,
     doc_profile: bytes,
     mode: Literal["job", "tender"],
+    *,
+    on_progress: Callable[[ProgressStage], None] | None = None,
 ) -> dict[str, Any]:
     """Prüfe Anforderungs-PDF gegen Profil-PDF; liefere Bewertung und API-Verbrauch.
 
@@ -77,6 +80,8 @@ def analyze(
     if mode not in ("job", "tender"):
         raise ValueError("Der Modus muss 'job' oder 'tender' sein.")
 
+    if on_progress is not None:
+        on_progress("text")
     requirement_pages = extract_pages_from_pdf(doc_requirements)
     profile_pages = extract_pages_from_pdf(doc_profile)
     chunks = build_page_chunks(profile_pages)
@@ -85,7 +90,11 @@ def analyze(
 
     extraction_usage = TokenUsage()
     assessment_usage = TokenUsage()
+    if on_progress is not None:
+        on_progress("requirements")
     requirements = extract_requirements(requirement_text, mode, usage=extraction_usage)
+    if on_progress is not None:
+        on_progress("evidence")
     requirements_with_context = [
         {
             **requirement,
@@ -93,6 +102,8 @@ def analyze(
         }
         for requirement in requirements
     ]
+    if on_progress is not None:
+        on_progress("assessment")
     assessment = assess_requirements(requirements_with_context, mode, usage=assessment_usage)
     canonical = {item["id"]: item for item in requirements}
     evaluated = [
