@@ -9,6 +9,9 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable, Literal
 
 from anthropic import Anthropic
+from pydantic import TypeAdapter, ValidationError
+
+from copilot.schema import AssessmentResponse, ExtractedRequirement
 
 
 DEFAULT_MODEL = "claude-haiku-5-5"
@@ -85,9 +88,7 @@ def _mode_instruction(mode: Mode) -> str:
         return (
             "Analysiere eine Ausschreibung gegen ein Firmenprofil. Pruefe Eignungs- "
             "und Leistungsanforderungen anhand belegter Referenzen, Zertifikate "
-            "und Kapazitaeten. Verwende die unveraenderten JSON-Feldnamen: "
-            "hervorzuhebende_projekte enthaelt passende Firmenreferenzen; "
-            "wahrscheinliche_interviewfragen enthaelt Klaerungsfragen zur Ausschreibung."
+            "und Kapazitaeten."
         )
     raise ValueError("Der Modus muss 'job' oder 'tender' sein.")
 
@@ -105,165 +106,133 @@ def estimate_request_tokens(system_prompt: str, user_prompt: str) -> int:
     return len(payload.encode("utf-8")) + TOKEN_SAFETY_MARGIN + MAX_TOKENS
 
 
+def _validation_error(error: ValidationError) -> LlmResponseError:
+    # Keine Eingaben, unbekannten Feldnamen oder Validator-Kontexte ausgeben.
+    # Feldpfade beschränken sich auf die bekannten Schema-Felder und Listenindizes.
+    fields = {"text", "typ", "requirements", "fazit", "id", "status",
+              "beleg", "zitat", "seite", "begruendung"}
+    details = []
+    for issue in error.errors(include_input=False, include_context=False, include_url=False)[:10]:
+        path = ".".join(str(part) if isinstance(part, int) or part in fields else "Feld"
+                        for part in issue["loc"]) or "Antwort"
+        details.append(f"{path}: {issue['type']}")
+    return LlmResponseError("Ungültiges JSON/Schema: " + "; ".join(details))
+
+
 def extract_requirements(
     job_ad_text: str, mode: Mode = "job", *, usage: TokenUsage | None = None
 ) -> list[dict[str, Any]]:
-    """Extract concrete requirements from a job ad or tender with Claude.
-
-    Args:
-        job_ad_text: Full text of the requirement document.
-        mode: Select job or tender prompts; the processing stays identical.
-        usage: Optional per-call collector for API-reported token usage.
-
-    Returns:
-        A list of requirement dictionaries. Each item contains at least
-        "requirement" and may contain fields such as "category".
-    """
+    """Extrahiere prüfbare Anforderungen und vergebe stabile IDs im Code."""
     if not job_ad_text.strip():
         raise ValueError("Das Anforderungsdokument ist leer.")
 
-    # System-Prompt = dauerhafte Rolle/Regeln/Output-Form.
-    # User-Prompt = konkrete Eingabedaten fuer genau diesen Aufruf.
     system_prompt = _mode_instruction(mode) + "\n" + DATA_RULE + "\n" + """
-Du bist ein praeziser Assistent fuer Anforderungsanalysen.
-Extrahiere nur konkrete Anforderungen, Aufgaben oder Erwartungen aus dem
-Anforderungsdokument, die spaeter gegen das Profil geprueft werden koennen.
-
-Antworte ausschliesslich mit validem JSON, ohne Markdown und ohne Erklaertext.
-Das JSON muss eine Liste sein. Jedes Element hat dieses Schema:
-{
-  "requirement": "kurzer, konkreter Anforderungstext",
-  "category": "muss | kann | aufgabe | soft_skill | sonstiges",
-  "reason": "kurze Begruendung, warum dies eine relevante Anforderung ist"
-}
+Extrahiere nur konkrete, gegen das Profil prüfbare Anforderungen und Aufgaben.
+Schließe Benefits, Unternehmensbeschreibung und Rahmenbedingungen ausdrücklich aus:
+Arbeitszeit, Ort, Vertragsart und Homeoffice sind keine Anforderungen.
+Klassifiziere ausdrücklich geforderte Fähigkeiten/Nachweise als "muss".
+Wünschenswertes (Plus, idealerweise) ist "kann". Reine Aufgabenbeschreibungen sind
+"kann", außer das Dokument verlangt die entsprechende Fähigkeit ausdrücklich.
+Antworte nur mit einer JSON-Liste, ohne Markdown oder Erklärtext:
+[{"text": "kurzer, konkreter Anforderungstext", "typ": "muss"}]
+Erlaubte Werte für typ: "muss", "kann". Keine weiteren Felder.
 """.strip()
-
     user_prompt = json.dumps({"dokumentdaten": job_ad_text}, ensure_ascii=False)
 
     def parse_requirements(response_text: str) -> list[dict[str, Any]]:
-        requirements = _parse_json_response(response_text)
-
-        if not isinstance(requirements, list):
-            raise LlmResponseError(
-                "Claude sollte eine JSON-Liste mit Anforderungen liefern, "
-                "hat aber etwas anderes geliefert."
-            )
-
+        try:
+            requirements = TypeAdapter(list[ExtractedRequirement]).validate_json(response_text)
+        except ValidationError as error:
+            raise _validation_error(error) from None
         if not requirements:
             raise LlmResponseError("Claude hat keine prüfbaren Anforderungen gefunden.")
-
-        for index, requirement in enumerate(requirements, start=1):
-            if not isinstance(requirement, dict):
-                raise LlmResponseError(
-                    f"Anforderung {index} ist kein JSON-Objekt."
-                )
-            requirement_text = requirement.get("requirement")
-            if not isinstance(requirement_text, str) or not requirement_text.strip():
-                raise LlmResponseError(
-                    f"Anforderung {index} enthaelt kein Feld 'requirement' mit Text."
-                )
-
-        return requirements
+        return [{"id": f"R{number}", **requirement.model_dump()}
+                for number, requirement in enumerate(requirements, start=1)]
 
     return _send_and_parse_with_retry(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        parse_response=parse_requirements,
-        model=os.environ.get("MODEL_EXTRACT") or DEFAULT_MODEL,
-        usage=usage,
+        system_prompt, user_prompt, parse_requirements,
+        model=os.environ.get("MODEL_EXTRACT") or DEFAULT_MODEL, usage=usage,
     )
+
+
+class _CoverageError(LlmResponseError):
+    """Eine strukturell gültige Bewertung mit unvollständiger ID-Abdeckung."""
+
+    def __init__(self, assessment: dict[str, Any], message: str):
+        super().__init__(message)
+        self.assessment = assessment
+
+
+def _reconcile_assessments(assessment: dict[str, Any], expected: list[str]) -> dict[str, Any]:
+    first_by_id = {}
+    for item in assessment["requirements"]:
+        if item["id"] in expected:
+            first_by_id.setdefault(item["id"], item)
+    return {
+        "fazit": assessment["fazit"],
+        "requirements": [first_by_id.get(requirement_id, {
+            "id": requirement_id, "status": "nicht_belegt", "beleg": None,
+            "begruendung": "Nicht bewertet",
+        }) for requirement_id in expected],
+    }
 
 
 def assess_requirements(
     requirements_with_context: list[dict[str, Any]], mode: Mode = "job",
     *, usage: TokenUsage | None = None,
 ) -> dict[str, Any]:
-    """Assess requirements against retrieved profile chunks with Claude.
-
-    Args:
-        requirements_with_context: Requirement dictionaries, each augmented with
-            the chunks retrieved for that requirement.
-        mode: Select job or tender prompts without changing the result schema.
-        usage: Optional per-call collector, including unusable responses.
-
-    Returns:
-        A JSON-compatible dictionary with matrix, gap framing, highlighted
-        projects, and likely interview questions.
-    """
+    """Bewerte jede ID; korrigiere Antwortfehler einmal, ergänze danach fehlende IDs."""
     if not requirements_with_context:
         raise ValueError("Es gibt keine Anforderungen fuer die Bewertung.")
-
+    expected = [requirement["id"] for requirement in requirements_with_context]
     system_prompt = _mode_instruction(mode) + "\n" + DATA_RULE + "\n" + """
-Du bist ein ehrlicher Assistent fuer belegbasierte Anforderungspruefung.
-Bewerte Anforderungen ausschliesslich auf Basis der mitgelieferten Profil-Chunks.
-Erfinde keine Erfahrung, keine Projekte und keine Nachweise. Wenn ein Beleg
-fehlt oder zu schwach ist, markiere das klar als Luecke.
-
-Antworte ausschliesslich mit validem JSON, ohne Markdown und ohne Erklaertext.
-Das JSON muss genau diese vier Hauptteile enthalten:
+Bewerte jede mitgelieferte Anforderungs-ID genau einmal, ohne neue IDs zu erfinden.
+Nutze nur die zugeordneten Profil-Chunks. Erfinde keine Erfahrung oder Nachweise.
+Status: "erfuellt", "teilweise" oder "nicht_belegt".
+erfuellt: Die Anforderung ist vollständig belegt. teilweise: Nur ein Teil ist
+belegt. nicht_belegt: Es gibt keinen ausreichenden Nachweis.
+Bei erfuellt/teilweise ist ein Beleg erforderlich: ein zusammenhängender,
+wörtlicher Ausschnitt aus genau einem Chunk, ohne Auslassungspunkte oder
+zusammengesetzte Textstellen. Nenne die Seite (page) dieses Chunks als seite.
+Bei nicht_belegt ist beleg null. Begründe jede Bewertung in einem kurzen Satz.
+Liefere ausschließlich JSON mit Bewertungen und einem Fazit von ein bis zwei Sätzen:
 {
-  "anforderungs_matrix": [
-    {
-      "requirement": "Anforderung",
-      "status": "erfuellt | teilweise | luecke",
-      "beleg": {
-        "filename": "Herkunftsdatei oder null",
-        "text": "konkreter Profil-Auszug oder null",
-        "score": 0.0
-      },
-      "begruendung": "kurze, konkrete Bewertung"
-    }
-  ],
-  "framing_vorschlaege": [
-    {
-      "luecke": "fehlender oder schwacher Nachweis",
-      "ehrliches_framing": "Formulierungsidee ohne Uebertreibung"
-    }
-  ],
-  "hervorzuhebende_projekte": [
-    {
-      "projekt": "Projekt/Modul/Erfahrung",
-      "warum_relevant": "Bezug zur Stelle",
-      "beleg_filename": "Herkunftsdatei oder null"
-    }
-  ],
-  "wahrscheinliche_interviewfragen": [
-    {
-      "frage": "Interviewfrage",
-      "grund": "Warum diese Frage wahrscheinlich ist"
-    }
-  ]
+  "requirements": [{"id": "R1", "status": "erfuellt",
+    "beleg": {"zitat": "Wörtlicher Ausschnitt", "seite": 1},
+    "begruendung": "Ein kurzer Satz"}],
+  "fazit": "Ein bis zwei Sätze"
 }
+Keine weiteren Felder, keinen Score, Muss-Zähler oder Token-Verbrauch liefern.
 """.strip()
-
-    user_payload = {
+    user_prompt = json.dumps({
         "dokumentdaten": _deduplicate_context(requirements_with_context),
-        "hinweis": (
-            "Der Chunk-Katalog enthaelt jeden Beleg einmal. Jede Anforderung "
-            "verweist mit chunk_id und ihrem eigenen Score auf passende Chunks. "
-            "Nutze nur diese zugeordneten Chunks als Belege."
-        ),
-    }
-    user_prompt = json.dumps(user_payload, ensure_ascii=False, indent=2)
+        "hinweis": "Jeder Chunk steht einmal im Katalog; nutze die pro Anforderung zugeordneten chunk_id.",
+    }, ensure_ascii=False, indent=2)
 
     def parse_assessment(response_text: str) -> dict[str, Any]:
-        assessment = _parse_json_response(response_text)
+        try:
+            assessment = AssessmentResponse.model_validate_json(response_text).model_dump()
+        except ValidationError as error:
+            raise _validation_error(error) from None
+        ids = [item["id"] for item in assessment["requirements"]]
+        missing = len(set(expected) - set(ids))
+        unknown = len(set(ids) - set(expected))
+        duplicates = len(ids) - len(set(ids))
+        if missing or unknown or duplicates:
+            raise _CoverageError(assessment, (
+                f"ID-Abdeckung ungültig: {missing} fehlende, {duplicates} doppelte, "
+                f"{unknown} unbekannte IDs. Liefere jede vorgegebene ID genau einmal."
+            ))
+        return _reconcile_assessments(assessment, expected)
 
-        if not isinstance(assessment, dict):
-            raise LlmResponseError(
-                "Claude sollte ein JSON-Objekt mit der Gesamtanalyse liefern, "
-                "hat aber etwas anderes geliefert."
-            )
-
-        return assessment
-
-    return _send_and_parse_with_retry(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        parse_response=parse_assessment,
-        model=os.environ.get("MODEL_ASSESS") or DEFAULT_MODEL,
-        usage=usage,
-    )
+    try:
+        return _send_and_parse_with_retry(
+            system_prompt, user_prompt, parse_assessment,
+            model=os.environ.get("MODEL_ASSESS") or DEFAULT_MODEL, usage=usage,
+        )
+    except _CoverageError as error:
+        # Nur nach dem zweiten Versuch: strukturell gültige Bewertungen retten.
+        return _reconcile_assessments(error.assessment, expected)
 
 
 def _deduplicate_context(requirements: list[dict[str, Any]]) -> dict[str, Any]:
@@ -375,9 +344,11 @@ def _send_and_parse_with_retry(
                 usage=usage,
             )
             return parse_response(response_text)
-        except LlmResponseError:
+        except LlmResponseError as error:
             if attempt == 1:
                 raise
+            user_prompt += ("\n\nKorrekturhinweis zur vorherigen Antwort: " + str(error)
+                            + "\nErzeuge die vollständige Antwort erneut im vorgegebenen JSON-Schema.")
 
     raise RuntimeError("Unerreichbarer Retry-Zustand.")
 

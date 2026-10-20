@@ -38,13 +38,15 @@ def test_pipeline_complete_without_files_or_network(pdf_bytes, offline_embedding
     document = pdf_bytes(["Python SQL Anforderungen " * 20])
     profile = pdf_bytes(["Python Erfahrung " * 20, "SQL Kenntnisse " * 20])
     requests = []
-    original_result = {
-        "anforderungs_matrix": [], "framing_vorschlaege": [],
-        "hervorzuhebende_projekte": [], "wahrscheinliche_interviewfragen": [],
+    model_result = {
+        "requirements": [
+            {"id": "R1", "status": "erfuellt", "beleg": {"zitat": "Python Erfahrung", "seite": 2}, "begruendung": "Erfahrung vorhanden"},
+            {"id": "R2", "status": "erfuellt", "beleg": {"zitat": "Erfundene SQL Erfahrung", "seite": 2}, "begruendung": "Kenntnisse vorhanden"},
+        ], "fazit": "Kenntnisse sind vorhanden.",
     }
     def create(**kwargs):
         requests.append(kwargs)
-        text = json.dumps([{"requirement": "Python"}, {"requirement": "SQL"}]) if len(requests) == 1 else json.dumps(original_result)
+        text = json.dumps([{"text": "Python", "typ": "muss"}, {"text": "SQL", "typ": "kann"}]) if len(requests) == 1 else json.dumps(model_result)
         return SimpleNamespace(
             content=[SimpleNamespace(text=text)], stop_reason="end_turn",
             usage=SimpleNamespace(input_tokens=11, output_tokens=7),
@@ -59,9 +61,14 @@ def test_pipeline_complete_without_files_or_network(pdf_bytes, offline_embedding
     monkeypatch.setattr(index, "_DEFAULT_INDEX", None)
 
     result = pipeline.analyze(document, profile, mode)
-    assert {k: v for k, v in result.items() if k != "usage"} == original_result
-    assert result["usage"]["total"]["total_tokens"] == 36
-    assert result["usage"]["extract"]["response_count"] == 1
+    assert set(result) == {"mode", "summary", "requirements", "usage"}
+    assert result["mode"] == mode
+    assert result["summary"] == {"score": 67, "muss_erfuellt": "1/1", "fazit": model_result["fazit"]}
+    assert result["requirements"][0]["beleg"]["seite"] == 1
+    assert result["requirements"][0]["text"] == "Python"
+    assert result["requirements"][1]["status"] == "nicht_belegt"
+    assert result["requirements"][1]["beleg"] is None
+    assert result["usage"] == {"input_tokens": 22, "output_tokens": 14}
     assert index._DEFAULT_INDEX is None
     payload = json.loads(requests[1]["messages"][0]["content"])["dokumentdaten"]
     assert {c["page"] for c in payload["chunks"]} == {1, 2}
@@ -71,19 +78,18 @@ def test_pipeline_complete_without_files_or_network(pdf_bytes, offline_embedding
 def test_parallel_profiles_and_usage_are_isolated(pdf_bytes, offline_embeddings, monkeypatch):
     document = pdf_bytes(["Anforderungen " * 20])
     profiles = [pdf_bytes(["Python " * 25]), pdf_bytes(["SQL " * 40])]
-    monkeypatch.setattr(pipeline, "extract_requirements", lambda *a, **kw: [{"requirement": "SQL"}])
+    monkeypatch.setattr(pipeline, "extract_requirements", lambda *a, **kw: [{"id": "R1", "text": "SQL", "typ": "muss"}])
     def assess(requirements, mode, *, usage):
         text = requirements[0]["retrieved_chunks"][0]["text"]
         usage.add_response(SimpleNamespace(input_tokens=len(text), output_tokens=2))
-        return {"source": text}
+        return {"fazit": text, "requirements": [{"id": "R1", "status": "nicht_belegt", "beleg": None, "begruendung": "Kein Beleg"}]}
     monkeypatch.setattr(pipeline, "assess_requirements", assess)
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda profile: pipeline.analyze(document, profile, "job"), profiles))
-    assert "Python" in results[0]["source"] and "SQL" not in results[0]["source"]
-    assert "SQL" in results[1]["source"] and "Python" not in results[1]["source"]
+    assert "Python" in results[0]["summary"]["fazit"] and "SQL" not in results[0]["summary"]["fazit"]
+    assert "SQL" in results[1]["summary"]["fazit"] and "Python" not in results[1]["summary"]["fazit"]
     for result in results:
-        assert result["usage"]["total"]["response_count"] == 1
-        assert result["usage"]["total"]["input_tokens"] == len(result["source"])
+        assert result["usage"] == {"input_tokens": len(result["summary"]["fazit"]), "output_tokens": 2}
 
 
 def test_documents_checked_before_embedding_or_api(pdf_bytes, monkeypatch):
@@ -100,12 +106,14 @@ def test_documents_checked_before_embedding_or_api(pdf_bytes, monkeypatch):
 def test_cli_reads_bytes_and_prints_only_json(pdf_bytes, monkeypatch, capsys):
     data = pdf_bytes(["Anforderungen " * 20])
     monkeypatch.setattr(cli.Path, "read_bytes", lambda self: data)
-    analyze = Mock(return_value={"anforderungs_matrix": [], "usage": {}})
+    expected = {"mode": "tender", "summary": {"score": 0, "muss_erfuellt": "0/0", "fazit": "Kein Nachweis"},
+                "requirements": [], "usage": {"input_tokens": 10, "output_tokens": 5}}
+    analyze = Mock(return_value=expected)
     monkeypatch.setattr(cli, "analyze", analyze)
     assert cli.main(["requirements.pdf", "profile.pdf", "--mode", "tender"]) == 0
     analyze.assert_called_once_with(data, data, "tender")
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == {"anforderungs_matrix": [], "usage": {}}
+    assert json.loads(captured.out) == expected
     assert captured.err == ""
 
 
@@ -126,3 +134,49 @@ def test_cli_pdf_error_and_invalid_mode(monkeypatch, capsys):
     with pytest.raises(SystemExit) as error:
         cli.main(["requirements.pdf", "profile.pdf", "--mode", "other"])
     assert error.value.code == 2
+
+
+def test_cli_full_result_after_reconciliation_with_retry_usage(
+    pdf_bytes, offline_embeddings, monkeypatch, capsys, caplog,
+):
+    document = pdf_bytes(["Python und SQL erforderlich " * 20])
+    profile = pdf_bytes(["Python Erfahrung " * 20])
+    monkeypatch.setattr(
+        cli.Path, "read_bytes",
+        lambda path: document if path.name == "requirements.pdf" else profile,
+    )
+    first = {"id": "R1", "status": "erfuellt",
+             "beleg": {"zitat": "Python Erfahrung", "seite": 1},
+             "begruendung": "Python ist belegt"}
+    duplicate = {"id": "R1", "status": "nicht_belegt",
+                 "beleg": None, "begruendung": "Spätere doppelte Bewertung"}
+    responses = [
+        [{"text": "Python", "typ": "muss"}, {"text": "SQL", "typ": "muss"}],
+        {"requirements": [first], "fazit": "Ein Nachweis fehlt."},
+        {"requirements": [first, duplicate, {**duplicate, "id": "R99"}],
+         "fazit": "Ein Nachweis fehlt."},
+    ]
+    messages = Mock()
+    messages.create.side_effect = [
+        SimpleNamespace(
+            content=[SimpleNamespace(text=json.dumps(data))], stop_reason="end_turn",
+            usage=SimpleNamespace(input_tokens=10, output_tokens=5,
+                                  cache_creation_input_tokens=2, cache_read_input_tokens=3),
+        ) for data in responses
+    ]
+    monkeypatch.setattr(llm, "_CLIENT", SimpleNamespace(messages=messages))
+    assert cli.main(["requirements.pdf", "profile.pdf", "--mode", "job"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out) == {
+        "mode": "job",
+        "summary": {"score": 50, "muss_erfuellt": "1/2", "fazit": "Ein Nachweis fehlt."},
+        "requirements": [
+            {**first, "text": "Python", "typ": "muss"},
+            {"id": "R2", "text": "SQL", "typ": "muss", "status": "nicht_belegt",
+             "beleg": None, "begruendung": "Nicht bewertet"},
+        ],
+        "usage": {"input_tokens": 45, "output_tokens": 15},
+    }
+    assert messages.create.call_count == 3
+    assert "Python Erfahrung" not in caplog.text
