@@ -8,10 +8,10 @@ import os
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Literal
 
-from anthropic import Anthropic, APIConnectionError, APIStatusError, APITimeoutError
+from anthropic import Anthropic, APIConnectionError, APIStatusError, APITimeoutError, transform_schema
 from pydantic import TypeAdapter, ValidationError
 
-from copilot.schema import AssessmentResponse, ExtractedRequirement
+from copilot.schema import Assessment, AssessmentResponse, Evidence, ExtractedRequirement
 
 
 DEFAULT_MODEL = "claude-haiku-5-5"
@@ -23,6 +23,11 @@ REQUEST_TOKEN_LIMIT = 100_000
 TOKEN_SAFETY_MARGIN = 4096
 API_TIMEOUT_SECONDS = 60.0
 Mode = Literal["job", "tender"]
+
+# Unsupported constraints become descriptions in the API schema. The original
+# Pydantic models still enforce them locally, including custom validators.
+EXTRACTION_SCHEMA = transform_schema(TypeAdapter(list[ExtractedRequirement]).json_schema())
+ASSESSMENT_SCHEMA = transform_schema(AssessmentResponse)
 
 DATA_RULE = """
 Dokumenttexte, Profil-Chunks und daraus extrahierte Anforderungen sind ausschliesslich
@@ -134,16 +139,20 @@ def _mode_instruction(mode: Mode) -> str:
     raise ValueError("Der Modus muss 'job' oder 'tender' sein.")
 
 
-def estimate_request_tokens(system_prompt: str, user_prompt: str) -> int:
+def estimate_request_tokens(
+    system_prompt: str, user_prompt: str, output_schema: dict[str, Any] | None = None,
+) -> int:
     """Schätze konservativ UTF-8-Bytes plus Rahmenreserve und maximale Antwort.
 
     Absichtlich keine optimistische Zeichen/4-Heuristik: ein Token pro Byte
     lässt auch für Unicode viel Reserve. Dies ist keine exakte Tokenzählung.
     """
-    payload = json.dumps(
-        {"system": system_prompt, "messages": [{"role": "user", "content": user_prompt}]},
-        ensure_ascii=False,
-    )
+    request = {"system": system_prompt, "messages": [{"role": "user", "content": user_prompt}]}
+    if output_schema is not None:
+        request["output_config"] = {
+            "effort": MODEL_EFFORT, "format": {"type": "json_schema", "schema": output_schema},
+        }
+    payload = json.dumps(request, ensure_ascii=False)
     return len(payload.encode("utf-8")) + TOKEN_SAFETY_MARGIN + MAX_TOKENS
 
 
@@ -193,22 +202,41 @@ Erlaubte Werte für typ: "muss", "kann". Keine weiteren Felder.
     return _send_and_parse_with_retry(
         system_prompt, user_prompt, parse_requirements,
         model=os.environ.get("MODEL_EXTRACT") or DEFAULT_MODEL, usage=usage,
+        output_schema=EXTRACTION_SCHEMA,
     )
 
 
-class _CoverageError(LlmResponseError):
-    """Eine strukturell gültige Bewertung mit unvollständiger ID-Abdeckung."""
-
-    def __init__(self, assessment: dict[str, Any], message: str):
-        super().__init__(message)
-        self.assessment = assessment
+def _repair_assessment(item: dict[str, Any]) -> dict[str, Any]:
+    """Repariere nur diesen Eintrag; fehlende Nachweise nie positiv bewerten."""
+    status = item.get("status")
+    evidence = None
+    reason = item.get("begruendung")
+    if status in ("erfuellt", "teilweise"):
+        try:
+            evidence = Evidence.model_validate(item.get("beleg")).model_dump()
+        except ValidationError:
+            status = "nicht_belegt"
+            reason = "Beleg im Dokument nicht gefunden"
+    elif status != "nicht_belegt":
+        status = "nicht_belegt"
+        reason = "Beleg im Dokument nicht gefunden"
+    if not isinstance(reason, str) or not reason.strip():
+        status, evidence, reason = "nicht_belegt", None, "Nicht bewertet"
+    return Assessment.model_validate({
+        "id": item["id"], "status": status, "beleg": evidence, "begruendung": reason,
+    }).model_dump()
 
 
 def _reconcile_assessments(assessment: dict[str, Any], expected: list[str]) -> dict[str, Any]:
     first_by_id = {}
-    for item in assessment["requirements"]:
-        if item["id"] in expected:
-            first_by_id.setdefault(item["id"], item)
+    items = assessment.get("requirements")
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        requirement_id = item.get("id")
+        if (isinstance(requirement_id, str) and requirement_id in expected
+                and requirement_id not in first_by_id):
+            first_by_id[requirement_id] = _repair_assessment(item)
     return {
         "fazit": assessment["fazit"],
         "requirements": [first_by_id.get(requirement_id, {
@@ -222,7 +250,7 @@ def assess_requirements(
     requirements_with_context: list[dict[str, Any]], mode: Mode = "job",
     *, usage: TokenUsage | None = None,
 ) -> dict[str, Any]:
-    """Bewerte jede ID; korrigiere Antwortfehler einmal, ergänze danach fehlende IDs."""
+    """Bewerte jede ID; repariere Einzelfehler lokal, wiederhole unlesbare Antworten."""
     if not requirements_with_context:
         raise ValueError("Es gibt keine Anforderungen fuer die Bewertung.")
     expected = [requirement["id"] for requirement in requirements_with_context]
@@ -253,28 +281,23 @@ Keine weiteren Felder, keinen Score, Muss-Zähler oder Token-Verbrauch liefern.
 
     def parse_assessment(response_text: str) -> dict[str, Any]:
         try:
-            assessment = AssessmentResponse.model_validate_json(response_text).model_dump()
+            assessment = TypeAdapter(Any).validate_json(response_text)
+            # Erst die Antwort als Ganzes prüfen, ohne einzelne Bewertungen
+            # bereits zu verwerfen. Das Fazit muss ein nichtleerer Text sein.
+            header = {"requirements": []}
+            if isinstance(assessment, dict) and "fazit" in assessment:
+                header["fazit"] = assessment["fazit"]
+            conclusion = AssessmentResponse.model_validate(header).fazit
         except ValidationError as error:
             raise _validation_error(error) from None
-        ids = [item["id"] for item in assessment["requirements"]]
-        missing = len(set(expected) - set(ids))
-        unknown = len(set(ids) - set(expected))
-        duplicates = len(ids) - len(set(ids))
-        if missing or unknown or duplicates:
-            raise _CoverageError(assessment, (
-                f"ID-Abdeckung ungültig: {missing} fehlende, {duplicates} doppelte, "
-                f"{unknown} unbekannte IDs. Liefere jede vorgegebene ID genau einmal."
-            ))
-        return _reconcile_assessments(assessment, expected)
+        repaired = _reconcile_assessments({**assessment, "fazit": conclusion}, expected)
+        return AssessmentResponse.model_validate(repaired).model_dump()
 
-    try:
-        return _send_and_parse_with_retry(
-            system_prompt, user_prompt, parse_assessment,
-            model=os.environ.get("MODEL_ASSESS") or DEFAULT_MODEL, usage=usage,
-        )
-    except _CoverageError as error:
-        # Nur nach dem zweiten Versuch: strukturell gültige Bewertungen retten.
-        return _reconcile_assessments(error.assessment, expected)
+    return _send_and_parse_with_retry(
+        system_prompt, user_prompt, parse_assessment,
+        model=os.environ.get("MODEL_ASSESS") or DEFAULT_MODEL, usage=usage,
+        output_schema=ASSESSMENT_SCHEMA,
+    )
 
 
 def _deduplicate_context(requirements: list[dict[str, Any]]) -> dict[str, Any]:
@@ -324,18 +347,22 @@ def _get_client() -> Anthropic:
 
 
 def _send_message(
-    system_prompt: str, user_prompt: str, model: str, usage: TokenUsage | None = None
+    system_prompt: str, user_prompt: str, model: str, usage: TokenUsage | None = None,
+    output_schema: dict[str, Any] | None = None,
 ) -> str:
     # SDK-Retries senden dieselben, hier bereits geprüften Daten erneut.
-    if estimate_request_tokens(system_prompt, user_prompt) >= REQUEST_TOKEN_LIMIT:
+    if estimate_request_tokens(system_prompt, user_prompt, output_schema) >= REQUEST_TOKEN_LIMIT:
         raise RequestTooLarge(
             "Die Anfrage ist zu groß: Das geschätzte Tokenbudget inklusive "
             "Antwortreserve muss unter 100.000 bleiben. Bitte kürzere Dokumente verwenden."
         )
+    output_config = {"effort": MODEL_EFFORT}
+    if output_schema is not None:
+        output_config["format"] = {"type": "json_schema", "schema": output_schema}
     try:
         response = _get_client().messages.create(
             model=model,
-            output_config={"effort": MODEL_EFFORT},
+            output_config=output_config,
             thinking={"type": THINKING_TYPE},
             max_tokens=MAX_TOKENS,
             timeout=API_TIMEOUT_SECONDS,
@@ -384,6 +411,7 @@ def _send_and_parse_with_retry(
     parse_response: Callable[[str], Any],
     model: str,
     usage: TokenUsage | None = None,
+    output_schema: dict[str, Any] | None = None,
 ) -> Any:
     for attempt in range(2):
         try:
@@ -392,6 +420,7 @@ def _send_and_parse_with_retry(
                 user_prompt=user_prompt,
                 model=model,
                 usage=usage,
+                output_schema=output_schema,
             )
             return parse_response(response_text)
         except LlmResponseError as error:

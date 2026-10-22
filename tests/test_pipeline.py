@@ -176,7 +176,7 @@ def test_cli_pdf_error_and_invalid_mode(monkeypatch, capsys):
     assert error.value.code == 2
 
 
-def test_cli_full_result_after_reconciliation_with_retry_usage(
+def test_cli_full_result_after_local_reconciliation_with_usage(
     pdf_bytes, offline_embeddings, monkeypatch, capsys, caplog,
 ):
     document = pdf_bytes(["Python und SQL erforderlich " * 20])
@@ -192,7 +192,6 @@ def test_cli_full_result_after_reconciliation_with_retry_usage(
                  "beleg": None, "begruendung": "Spätere doppelte Bewertung"}
     responses = [
         [{"text": "Python", "typ": "muss"}, {"text": "SQL", "typ": "muss"}],
-        {"requirements": [first], "fazit": "Ein Nachweis fehlt."},
         {"requirements": [first, duplicate, {**duplicate, "id": "R99"}],
          "fazit": "Ein Nachweis fehlt."},
     ]
@@ -216,7 +215,7 @@ def test_cli_full_result_after_reconciliation_with_retry_usage(
             {"id": "R2", "text": "SQL", "typ": "muss", "status": "nicht_belegt",
              "beleg": None, "begruendung": "Nicht bewertet"},
         ],
-        "usage": {"input_tokens": 45, "output_tokens": 15},
+        "usage": {"input_tokens": 30, "output_tokens": 10},
     }
-    assert messages.create.call_count == 3
+    assert messages.create.call_count == 2
     assert "Python Erfahrung" not in caplog.text

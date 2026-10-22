@@ -247,8 +247,7 @@ def context(*ids):
 
 @pytest.mark.parametrize("invalid", [
     "kein JSON", '{"requirements": [], "fazit": ""}',
-    '{"requirements": [], "fazit": "Fazit", "summary": {"score": 10}}',
-    assessment_json("R1").replace("nicht_belegt", "luecke"),
+    '{"requirements": []}', '{"requirements": [], "fazit": 42}', '[]',
     "```json\n" + assessment_json("R1") + "\n```",
 ])
 def test_assessment_validation_retries_with_error_feedback(messages, invalid):
@@ -267,6 +266,7 @@ def test_schema_error_never_exposes_model_values_or_unknown_field_names(messages
     invalid = json.loads(assessment_json("R1"))
     invalid["requirements"][0]["status"] = "PRIVATE_DOCUMENT_VALUE"
     invalid["PRIVATE_FIELD_NAME"] = "SECRET"
+    invalid["fazit"] = {"PRIVATE_FIELD_NAME": "SECRET"}
     messages.create.return_value = response(json.dumps(invalid))
     with pytest.raises(llm.LlmResponseError) as error:
         llm.assess_requirements(context("R1"))
@@ -281,7 +281,7 @@ def test_schema_error_never_exposes_model_values_or_unknown_field_names(messages
     ("R1", "R1"), ("R1",), ("R1", "R2", "R99"), (),
     ("R1", "R1", "R99"),
 ])
-def test_coverage_corrected_or_reconciled_after_exactly_one_retry(messages, ids):
+def test_coverage_reconciled_without_api_retry(messages, ids):
     data = json.loads(assessment_json(*ids))
     if ids:
         data["requirements"][0]["begruendung"] = "Erste Bewertung"
@@ -290,11 +290,10 @@ def test_coverage_corrected_or_reconciled_after_exactly_one_retry(messages, ids)
     messages.create.return_value = response(json.dumps(data))
     usage = llm.TokenUsage()
     result = llm.assess_requirements(context("R1", "R2"), usage=usage)
-    assert messages.create.call_count == 2
-    assert usage.input_tokens == 20
-    assert usage.output_tokens == 10
+    assert messages.create.call_count == 1
+    assert usage.input_tokens == 10
+    assert usage.output_tokens == 5
     assert [item["id"] for item in result["requirements"]] == ["R1", "R2"]
-    assert "ID-Abdeckung ungültig" in messages.create.call_args.kwargs["messages"][0]["content"]
     if "R1" in ids:
         assert result["requirements"][0]["begruendung"] == "Erste Bewertung"
     for item in result["requirements"]:
@@ -303,16 +302,19 @@ def test_coverage_corrected_or_reconciled_after_exactly_one_retry(messages, ids)
                             "beleg": None, "begruendung": "Nicht bewertet"}
 
 
-def test_successful_coverage_retry_uses_new_answer(messages):
+def test_missing_assessment_does_not_replace_valid_answer(messages):
     messages.create.side_effect = [response(assessment_json("R1")), response(assessment_json("R2", "R1"))]
     result = llm.assess_requirements(context("R1", "R2"))
     assert [item["id"] for item in result["requirements"]] == ["R1", "R2"]
-    assert all(item["begruendung"] == "Kein Nachweis" for item in result["requirements"])
-    assert messages.create.call_count == 2
+    assert result["requirements"][0]["begruendung"] == "Kein Nachweis"
+    assert result["requirements"][1]["begruendung"] == "Nicht bewertet"
+    assert messages.create.call_count == 1
 
 
-def test_invalid_schema_after_coverage_error_is_not_salvaged(messages):
-    messages.create.side_effect = [response(assessment_json("R1")), response("kein JSON")]
+def test_unusable_fazit_then_invalid_json_is_not_salvaged(messages):
+    messages.create.side_effect = [
+        response('{"requirements": [], "fazit": null}'), response("kein JSON"),
+    ]
     with pytest.raises(llm.LlmResponseError):
         llm.assess_requirements(context("R1", "R2"))
     assert messages.create.call_count == 2
