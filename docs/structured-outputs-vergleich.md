@@ -1,6 +1,6 @@
 # Structured Outputs: Diagnose und Vergleich
 
-Messung am 20.10.2026. Ausgangsstand: Commit `b44a45e`.
+Messung am 20.10.2026. Ausgangsstand: Commit `d3c6174`.
 
 ## Durchführung
 
