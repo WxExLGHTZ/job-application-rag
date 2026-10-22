@@ -388,8 +388,6 @@ def use_own_document(side: int) -> None:
 def select_example() -> None:
     clear_result()
     st.session_state.use_example = (True, True)
-    # Einmaliger Startwunsch; vor der Analyse konsumieren, niemals bei Rerun erneut.
-    st.session_state.start_example_analysis = True
     # Neue Widget-Keys leeren alte Uploads vor dem nächsten Rendern.
     st.session_state.upload_generation += 1
 
@@ -552,17 +550,18 @@ def main() -> None:
                                 st.markdown(render_file_note(uploads[side].name), unsafe_allow_html=True)
             requirements_upload, profile_upload = uploads
             st.button("Beispiel laden", key="example_button", type="primary", width="stretch", on_click=select_example,
-                      help="Startet eine Live-Analyse mit den fiktiven Beispiel-PDFs und zählt gegen die Analyse-Limits.")
+                      help="Wählt die fiktiven Beispiel-PDFs aus. Die Analyse startet erst mit „Analysieren”.")
             if any(st.session_state.use_example):
-                st.caption("Fiktive Beispieldateien. Jede Live-Analyse zählt gegen die Analyse-Limits.")
+                st.caption("Fiktive Beispieldateien ausgewählt. Starte die Auswertung mit „Analysieren”. Jede Live-Analyse zählt gegen die Analyse-Limits.")
 
         with st.container(key="step_analyze"):
             render_step(3, "Anforderungen prüfen")
             ready = all(selected or upload is not None
                         for selected, upload in zip(st.session_state.use_example, uploads))
-            start_example = st.session_state.pop("start_example_analysis", False)
+            # Startwünsche einer bereits offenen Sitzung der alten Version verwerfen.
+            st.session_state.pop("start_example_analysis", None)
             clicked = st.button("Analysieren", key="analyze_button", type="primary", disabled=not ready, width="stretch")
-            if (clicked or start_example) and ready:
+            if clicked and ready:
                 with st.status("Analyse wird vorbereitet …", expanded=True) as status:
                     started = perf_counter()
                     try:

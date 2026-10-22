@@ -80,7 +80,7 @@ def test_public_selector_downloads_original_pdfs_without_api(monkeypatch):
 
 
 @pytest.mark.parametrize("mode", ["job", "tender"])
-def test_load_example_starts_one_live_analysis_with_limits_and_progress(monkeypatch, mode):
+def test_example_inputs_wait_for_explicit_analysis_with_limits_and_progress(monkeypatch, mode):
     monkeypatch.setenv("ACCESS_CODE", "test-invitation")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setattr(app, "load_model", lambda: None)
@@ -101,6 +101,19 @@ def test_load_example_starts_one_live_analysis_with_limits_and_progress(monkeypa
         at.get("button_group")[0].set_value(mode).run()
         at.button(key="example_button").click().run()
         assert not at.exception and not at.error
+        mocked.assert_not_called()
+        assert "result" not in at.session_state
+        assert not at.status
+        assert at.session_state["access_session"].analyses == app.get_limits().daily_count == 0
+        assert not at.get("file_uploader")
+        assert not at.button(key="analyze_button").disabled
+        assert [item.proto.label for item in at.get("download_button")] == [
+            f"{label} ansehen" for label in app.UPLOAD_LABELS[mode]
+        ]
+        at.run()
+        mocked.assert_not_called()
+        at.button(key="analyze_button").click().run()
+        assert not at.exception and not at.error
         mocked.assert_called_once()
         assert at.session_state["result"] == expected
         assert at.session_state["access_session"].analyses == app.get_limits().daily_count == 1
@@ -114,11 +127,15 @@ def test_load_example_starts_one_live_analysis_with_limits_and_progress(monkeypa
         assert len(at.get("file_uploader")) == 1
         assert "result" not in at.session_state
         assert at.button(key="analyze_button").disabled
-        # Session-Limit gilt auch für den automatischen Beispielstart.
+        # Das Laden der Beispiele bleibt auch nach Erreichen des Limits möglich.
         for _ in range(4):
             with app.get_limits().analysis(at.session_state["access_session"]):
                 before_api_request(None)
         at.button(key="example_button").click().run()
+        assert not at.exception
+        assert not at.info
+        mocked.assert_called_once()
+        at.button(key="analyze_button").click().run()
         assert not at.exception
         assert any("Analyse-Limit für diese Sitzung" in info.value for info in at.info)
         mocked.assert_called_once()

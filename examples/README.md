@@ -3,7 +3,8 @@
 Beide PDF-Paare und Ergebnisse sind fiktiv. Die öffentliche Ansicht startet mit
 der Ausschreibung. Ohne Zugangscode zeigt sie ausschließlich gespeicherte Daten;
 die Original-PDFs können zum Nachprüfen heruntergeladen werden. Mit Zugangscode
-startet „Beispiel laden” eine neue Live-Analyse, die gegen die Limits zählt.
+wählt „Beispiel laden” die beiden PDFs als Eingaben aus. Erst „Analysieren”
+startet eine neue Live-Analyse, die gegen die Limits zählt.
 
 ## Erstellung am 22.10.2026
 
