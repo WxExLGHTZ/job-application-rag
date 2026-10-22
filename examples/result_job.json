@@ -3,7 +3,7 @@
   "summary": {
     "score": 68,
     "muss_erfuellt": "6/7",
-    "fazit": "Die Person erfüllt die meisten Muss-Anforderungen (Studium, Python, Embeddings/semantische Suche, Git, Sprachen), hat bei Docker aber nur Grundkenntnisse. Von den optionalen Anforderungen ist nur Azure ansatzweise belegt."
+    "fazit": "Die Person erfüllt die meisten Muss-Anforderungen, insbesondere Studium, Python, Embeddings/semantische Suche, Git und Sprachen. Docker ist nur auf Grundkenntnis-Niveau belegt, und bei den Kann-Anforderungen bestehen überwiegend Lücken."
   },
   "requirements": [
     {
@@ -24,7 +24,7 @@
         "zitat": "Programmierung: Python (sehr gut), SQL (gut), JavaScript (Grundkenntnisse)",
         "seite": 2
       },
-      "begruendung": "Python-Kenntnisse sind ausdrücklich als sehr gut angegeben.",
+      "begruendung": "Python-Kenntnisse sind als sehr gut ausgewiesen und durch Projekte gestützt.",
       "text": "Sehr gute Kenntnisse in Python",
       "typ": "muss"
     },
@@ -32,10 +32,10 @@
       "id": "R3",
       "status": "erfuellt",
       "beleg": {
-        "zitat": "Aufbau einer semantischen Suche über interne Handbücher mit sentence-transformers und Cosine Similarity",
+        "zitat": "- Aufbau einer semantischen Suche über interne Handbücher mit sentence-transformers und Cosine Similarity",
         "seite": 1
       },
-      "begruendung": "Praktische Erfahrung mit Embeddings und semantischer Suche ist im Beruf und in Projekten belegt.",
+      "begruendung": "Praktische Erfahrung mit Embeddings und semantischer Suche ist belegt, auch wenn keine RAG-Systeme genannt sind.",
       "text": "Praktische Erfahrung mit Embeddings, semantischer Suche oder RAG-Systemen",
       "typ": "muss"
     },
@@ -43,10 +43,10 @@
       "id": "R4",
       "status": "erfuellt",
       "beleg": {
-        "zitat": "Versionsverwaltung aller Projekte mit Git und GitLab, Code-Reviews über Merge Requests",
+        "zitat": "- Versionsverwaltung aller Projekte mit Git und GitLab, Code-Reviews über Merge Requests",
         "seite": 1
       },
-      "begruendung": "Git wird durchgängig in Projekten samt Merge-Request-Reviews genutzt.",
+      "begruendung": "Git wird in allen Projekten inklusive Merge-Request-Reviews eingesetzt.",
       "text": "Sicherer Umgang mit Git",
       "typ": "muss"
     },
@@ -57,7 +57,7 @@
         "zitat": "Werkzeuge: Git, GitLab, Docker (Grundkenntnisse aus dem Studium), Linux",
         "seite": 2
       },
-      "begruendung": "Docker ist nur auf Grundkenntnisniveau belegt, ein sicherer Umgang wird nicht nachgewiesen.",
+      "begruendung": "Docker ist nur auf Grundkenntnis-Niveau belegt, gefordert ist sicherer Umgang.",
       "text": "Sicherer Umgang mit Docker",
       "typ": "muss"
     },
@@ -68,7 +68,7 @@
         "zitat": "Sprachen: Deutsch (Muttersprache), Englisch (B2)",
         "seite": 2
       },
-      "begruendung": "Deutsch ist Muttersprache und übertrifft damit sehr gute Kenntnisse.",
+      "begruendung": "Deutsch als Muttersprache übertrifft die Anforderung sehr gut.",
       "text": "Sehr gute Deutschkenntnisse",
       "typ": "muss"
     },
@@ -79,7 +79,7 @@
         "zitat": "Sprachen: Deutsch (Muttersprache), Englisch (B2)",
         "seite": 2
       },
-      "begruendung": "Englisch B2 entspricht dem geforderten guten Niveau.",
+      "begruendung": "B2 entspricht guten Englischkenntnissen.",
       "text": "Gute Englischkenntnisse",
       "typ": "muss"
     },
@@ -87,7 +87,7 @@
       "id": "R8",
       "status": "nicht_belegt",
       "beleg": null,
-      "begruendung": "Kubernetes wird im Profil nicht erwähnt.",
+      "begruendung": "Kubernetes wird im Profil nirgends erwähnt.",
       "text": "Erfahrung mit Kubernetes",
       "typ": "kann"
     },
@@ -98,7 +98,7 @@
         "zitat": "Cloud: Microsoft Azure (Grundkurs AZ-900 besucht, keine Projekterfahrung)",
         "seite": 2
       },
-      "begruendung": "Azure-Kenntnisse beschränken sich auf einen Grundkurs ohne Projekterfahrung.",
+      "begruendung": "Nur ein Azure-Grundkurs ohne Projekterfahrung ist belegt, keine praktischen Kenntnisse.",
       "text": "Kenntnisse in Microsoft Azure oder Google Cloud Platform",
       "typ": "kann"
     },
@@ -106,7 +106,7 @@
       "id": "R10",
       "status": "nicht_belegt",
       "beleg": null,
-      "begruendung": "LangChain, LangGraph oder ähnliche Frameworks werden nicht genannt.",
+      "begruendung": "LangChain, LangGraph oder vergleichbare Frameworks werden nicht genannt.",
       "text": "Erfahrung mit Frameworks wie LangChain oder LangGraph",
       "typ": "kann"
     },
@@ -130,13 +130,13 @@
       "id": "R13",
       "status": "nicht_belegt",
       "beleg": null,
-      "begruendung": "MLOps-Werkzeuge wie MLflow sind nicht belegt.",
+      "begruendung": "MLflow oder andere MLOps-Werkzeuge sind nicht belegt.",
       "text": "Erfahrung mit MLOps-Werkzeugen wie MLflow",
       "typ": "kann"
     }
   ],
   "usage": {
     "input_tokens": 8874,
-    "output_tokens": 1781
+    "output_tokens": 1804
   }
 }

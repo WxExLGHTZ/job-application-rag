@@ -200,6 +200,8 @@ fachlichen Anforderungen an die Person.
         return """
 Modus tender: Extrahiere Eignungskriterien wie Referenzen, Zertifikate, Umsatz und
 Personal sowie fachliche Leistungsanforderungen an die ausgeschriebene Leistung.
+Reine Zuschlagskriterien (Bewertungsmaßstäbe und Gewichtungen für Preis oder
+Angebotsqualität) sind keine Anforderungen und werden nicht extrahiert.
 Fristen und Formalien der Angebotsabgabe sind ausgeschlossen: etwa Abgabetermin,
 Einreichungsweg, Dateiformat oder Unterschrift des Angebots. Verwechsle diese nicht
 mit geforderten Liefer- oder Leistungsfristen; diese gehören ebenso wie geforderte

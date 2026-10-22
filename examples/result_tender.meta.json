@@ -1,0 +1,30 @@
+{
+  "mode": "tender",
+  "created_at": "2026-10-22T15:53:32.932824+00:00",
+  "result_sha256": "d09b45a464cddbd00d20fb12780e13d5bde478faf82d7026696c64816f6ad970",
+  "duration_seconds": 19.906180900055915,
+  "duration_scope": "analyze inklusive PDF-Lesen und gegebenenfalls Modellinitialisierung",
+  "cost_usd": "0.0299834",
+  "usage_by_model": {
+    "claude-haiku-5-5": {
+      "input_tokens": 3784,
+      "output_tokens": 710,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_1h_input_tokens": 0,
+      "response_count": 1,
+      "total_tokens": 4494
+    },
+    "claude-sonnet-5-5": {
+      "input_tokens": 6255,
+      "output_tokens": 1674,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_1h_input_tokens": 0,
+      "response_count": 1,
+      "total_tokens": 7929
+    }
+  },
+  "pricing_checked_on": "2026-10-22",
+  "pricing_source": "https://platform.claude.com/docs/en/about-claude/pricing"
+}

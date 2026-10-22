@@ -1,0 +1,142 @@
+{
+  "mode": "tender",
+  "summary": {
+    "score": 50,
+    "muss_erfuellt": "4/11",
+    "fazit": "Das Profil belegt Umsatz, PRINCE2-Projektleitung, Fachkräfte und DSGVO-konformes Hosting, verfehlt aber mehrere Muss-Kriterien (ISO-27001-Zertifikat, drei Referenzen, XBau-Schnittstelle, BITV 2.0, 4-Stunden-Reaktionszeit). Die Eignung ist daher nicht gegeben."
+  },
+  "requirements": [
+    {
+      "id": "R1",
+      "status": "nicht_belegt",
+      "beleg": null,
+      "begruendung": "Das Profil nennt nur eine Orientierung an ISO/IEC 27001 und eine geplante Zertifizierung (Audit Q1 2027), aber keine gültige Zertifizierung.",
+      "text": "Gültige Zertifizierung nach ISO/IEC 27001 zum Zeitpunkt der Angebotsabgabe",
+      "typ": "muss"
+    },
+    {
+      "id": "R2",
+      "status": "teilweise",
+      "beleg": {
+        "zitat": "Digitalisierung von 25.000 Sozialakten einschließlich Einführung eines\nDokumentenmanagementsystems für 60 Mitarbeitende.",
+        "seite": 2
+      },
+      "begruendung": "Nur ein Referenzprojekt (Landkreis Beispielhausen, 2025) ist für einen öffentlichen Auftraggeber belegt, gefordert sind mindestens drei.",
+      "text": "Mindestens drei Referenzprojekte zur Digitalisierung von Verwaltungsakten bei öffentlichen Auftraggebern aus den letzten drei Jahren",
+      "typ": "muss"
+    },
+    {
+      "id": "R3",
+      "status": "erfuellt",
+      "beleg": {
+        "zitat": "- Jahresumsatz 2023: 1,9 Millionen Euro\n- Jahresumsatz 2024: 2,1 Millionen Euro\n- Jahresumsatz 2025: 2,3 Millionen Euro",
+        "seite": 1
+      },
+      "begruendung": "Der Durchschnittsumsatz der drei Jahre beträgt 2,1 Mio. Euro und liegt über der geforderten Schwelle von 1,5 Mio. Euro.",
+      "text": "Durchschnittlicher Jahresumsatz von mindestens 1,5 Millionen Euro in den letzten drei Geschäftsjahren",
+      "typ": "muss"
+    },
+    {
+      "id": "R4",
+      "status": "erfuellt",
+      "beleg": {
+        "zitat": "- Projektleitung: Anna Beispiel, zertifiziert als PRINCE2 Practitioner",
+        "seite": 2
+      },
+      "begruendung": "Die Projektleitung ist nach PRINCE2 zertifiziert, was die Alternative PMP oder PRINCE2 erfüllt.",
+      "text": "Projektleitung mit Zertifizierung nach PMP oder PRINCE2",
+      "typ": "muss"
+    },
+    {
+      "id": "R5",
+      "status": "erfuellt",
+      "beleg": {
+        "zitat": "- 18 festangestellte Mitarbeitende, davon sechs Fachkräfte für die Einführung von\nDokumentenmanagementsystemen",
+        "seite": 1
+      },
+      "begruendung": "Sechs festangestellte Fachkräfte übertreffen die geforderten fünf.",
+      "text": "Mindestens fünf festangestellte Fachkräfte mit Erfahrung in der Einführung von Dokumentenmanagementsystemen",
+      "typ": "muss"
+    },
+    {
+      "id": "R6",
+      "status": "nicht_belegt",
+      "beleg": null,
+      "begruendung": "Im Profil findet sich kein Hinweis auf Erfahrung mit XBau.",
+      "text": "Praktische Erfahrung mit dem Austauschstandard XBau",
+      "typ": "kann"
+    },
+    {
+      "id": "R7",
+      "status": "nicht_belegt",
+      "beleg": null,
+      "begruendung": "Im Profil ist kein BSI-C5-Testat genannt.",
+      "text": "Testat nach BSI C5 für die angebotene Cloud-Plattform",
+      "typ": "kann"
+    },
+    {
+      "id": "R8",
+      "status": "teilweise",
+      "beleg": {
+        "zitat": "- Eigene Scanstraße mit Texterkennung (OCR), Kapazität bis zu 5.000 Seiten pro Tag",
+        "seite": 1
+      },
+      "begruendung": "Scan und OCR sind als Leistung belegt, aber es gibt keinen Nachweis für ein Projekt dieser Größenordnung (Referenz nur 25.000 Sozialakten, keine Bauakten).",
+      "text": "Digitalisierung von rund 40.000 Bauakten einschließlich Scan und Texterkennung (OCR)",
+      "typ": "muss"
+    },
+    {
+      "id": "R9",
+      "status": "erfuellt",
+      "beleg": {
+        "zitat": "- Betrieb eines Dokumentenmanagementsystems im eigenen Rechenzentrum in Frankfurt am\nMain, DSGVO-konform",
+        "seite": 1
+      },
+      "begruendung": "DMS-Betrieb im eigenen Rechenzentrum in Deutschland und DSGVO-konform ist belegt.",
+      "text": "Bereitstellung eines Dokumentenmanagementsystems mit Hosting in einem Rechenzentrum in Deutschland, DSGVO-konform",
+      "typ": "muss"
+    },
+    {
+      "id": "R10",
+      "status": "nicht_belegt",
+      "beleg": null,
+      "begruendung": "Eine XBau-Schnittstelle wird im Profil nicht erwähnt.",
+      "text": "Schnittstelle zum Datenaustausch im Standard XBau",
+      "typ": "muss"
+    },
+    {
+      "id": "R11",
+      "status": "teilweise",
+      "beleg": {
+        "zitat": "- Anwenderschulungen vor Ort und online",
+        "seite": 1
+      },
+      "begruendung": "Anwenderschulungen werden angeboten, aber es ist nichts zur Schulung von 25 Mitarbeitenden oder zur Kapazität belegt.",
+      "text": "Schulung von 25 Mitarbeitenden des Fachbereichs Bauordnung",
+      "typ": "muss"
+    },
+    {
+      "id": "R12",
+      "status": "teilweise",
+      "beleg": {
+        "zitat": "- Support montags bis freitags von 8 bis 18 Uhr mit einer Reaktionszeit von höchstens 8 Stunden",
+        "seite": 1
+      },
+      "begruendung": "Support an Werktagen ist belegt, aber die Reaktionszeit von 8 Stunden verfehlt die geforderten 4 Stunden.",
+      "text": "Support während der Vertragslaufzeit mit einer Reaktionszeit von höchstens 4 Stunden an Werktagen",
+      "typ": "muss"
+    },
+    {
+      "id": "R13",
+      "status": "nicht_belegt",
+      "beleg": null,
+      "begruendung": "Zur Barrierefreiheit nach BITV 2.0 enthält das Profil keine Angaben.",
+      "text": "Barrierefreie Benutzeroberfläche nach BITV 2.0",
+      "typ": "muss"
+    }
+  ],
+  "usage": {
+    "input_tokens": 10039,
+    "output_tokens": 2384
+  }
+}

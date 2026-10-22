@@ -26,7 +26,8 @@ button:focus-visible, a:focus-visible { outline: 3px solid #93b4ff !important; o
 .ac-eyebrow { color: #3856a0; font-size: 10px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: var(--ac-space-2); }
 .ac-intro h1 { font-size: 32px; line-height: 1.2; letter-spacing: -1.1px; font-weight: 650; margin: 0 0 12px; padding: 0; }
 .ac-intro .ac-lead { color: #536073; font-size: 15px; line-height: 1.65; margin: 0 0 var(--ac-space-3); }
-.ac-privacy { display: flex; align-items: flex-start; gap: var(--ac-space-2); font-size: 11px; line-height: 1.7; color: #747e8e; max-width: 100%; white-space: nowrap; overflow-x: auto; }
+.ac-privacy { display: flex; align-items: flex-start; gap: var(--ac-space-2); font-size: 11px; line-height: 1.7; color: #747e8e; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.ac-privacy span { min-width: 0; }
 .ac-privacy svg { width: 13px; height: 13px; flex: 0 0 auto; margin-top: 3px; }
 .st-key-input_card { border: 1px solid var(--ac-line); background: #fff; border-radius: 12px; padding: var(--ac-space-5); gap: var(--ac-space-4); box-shadow: 0 2px 4px #18223003; }
 .st-key-step_mode, .st-key-step_analyze { gap: var(--ac-space-2); }
@@ -54,7 +55,19 @@ button:focus-visible, a:focus-visible { outline: 3px solid #93b4ff !important; o
 .ac-file { margin: 0; display: flex; align-items: center; gap: var(--ac-space-2); color: #52627b; font-size: 11px; }
 .ac-file svg { width: 14px; height: 14px; flex: 0 0 auto; color: #5d79bc; }
 .ac-file span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.st-key-example_button button { font-size: 12px; min-height: 35px; background: #fff; border-color: #d7dde7; border-radius: 7px; color: #43516b; }
+.st-key-document_heading { flex-wrap: nowrap; gap: var(--ac-space-2); }
+.st-key-example_button { flex: 0 0 auto; }
+.st-key-example_button button { font-size: 12px; min-height: 32px; background: transparent; border: 0; color: #43516b; padding: 4px 0 4px 8px; }
+.st-key-example_button button:hover { color: var(--ac-blue); background: #f1f5ff; }
+.ac-example-label { font-size: 13px; font-weight: 550; margin-bottom: var(--ac-space-2); }
+.ac-example-document { display: flex; align-items: center; gap: 12px; min-height: 88px; border: 1px solid var(--ac-line); border-radius: 9px; padding: var(--ac-space-3); background: #fafbfe; }
+.ac-example-document > svg { width: 24px; height: 24px; color: #5d79bc; flex: 0 0 auto; }
+.ac-example-document > div { min-width: 0; }
+.ac-example-document strong { display: block; font-size: 12px; font-weight: 550; overflow-wrap: anywhere; margin-bottom: var(--ac-space-2); }
+.ac-example-badge { display: inline-block; font-size: 10px; color: #536b9b; background: #edf2ff; border: 1px solid #dce4f8; padding: 1px 6px; border-radius: 4px; }
+.st-key-document_uploads [data-testid="stBaseButton-tertiary"], .st-key-public_example_card [data-testid="stDownloadButton"] button { color: var(--ac-blue); font-size: 11px; min-height: 28px; padding: 2px 0; }
+.st-key-document_uploads [data-testid="stBaseButton-tertiary"] p, .st-key-public_example_card [data-testid="stDownloadButton"] button p { font-size: 12px; }
+.st-key-public_example_card { background: white; border: 1px solid var(--ac-line); border-radius: 12px; padding: var(--ac-space-4); gap: var(--ac-space-2); }
 .st-key-analyze_button button { min-height: 44px; background: var(--ac-blue); border-color: var(--ac-blue); border-radius: 7px; font-size: 13px; font-weight: 600; }
 .st-key-analyze_button button:hover { background: #193992; border-color: #193992; }
 .st-key-analyze_button button:disabled { background: #9baccf; color: #fff; border-color: #9baccf; opacity: .72; }
@@ -112,8 +125,9 @@ button:focus-visible, a:focus-visible { outline: 3px solid #93b4ff !important; o
 .ac-verified { display: inline-block; font-size: 9px; color: #648370; background: #f1f7f3; border: 1px solid #e4eee7; border-radius: 4px; padding: 1px 5px; }
 .ac-evidence-missing { font-size: 10px; color: #b56b65; }
 .ac-no-matches { text-align: center; padding: 28px; font-size: 13px; color: #7b8595; }
-.st-key-export_actions { margin-top: 0; gap: var(--ac-space-2); }
+.st-key-export_actions { margin-top: 0; gap: var(--ac-space-2); justify-content: flex-end; }
 .st-key-export_actions button { font-size: 11px; min-height: 35px; border-color: #d7dde7; border-radius: 6px; background: #fff; }
+.st-key-export_actions button p { font-size: 11px; white-space: nowrap; }
 .ac-footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: var(--ac-space-2); border-top: 1px solid var(--ac-line); padding: var(--ac-space-4) 0 0; margin-top: var(--ac-space-3); color: #98a0ae; font-size: 10px; }
 .ac-footer a { color: #74819a; text-decoration: none; }
 .ac-footer a:hover { color: var(--ac-blue); text-decoration: underline; }

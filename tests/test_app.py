@@ -47,6 +47,12 @@ def live_app():
     return at.run()
 
 
+def prepare_example(at):
+    """Bereite Eingaben für isolierte Start-/Fehlertests ohne automatischen Start vor."""
+    at.session_state["use_example"] = (True, True)
+    at.run()
+
+
 @pytest.fixture
 def ui(monkeypatch, result, live_access):
     monkeypatch.setattr(app, "load_model", lambda: object())
@@ -65,7 +71,7 @@ def test_initial_view_and_mode_dependent_labels(ui):
     at, analyze = ui
     assert not at.exception
     assert any("Anforderungs-Check" in item.value for item in at.markdown)
-    assert at.button[1].disabled
+    assert at.button(key="analyze_button").disabled
     assert [item.proto.label for item in at.get("file_uploader")] == [
         "Stellenanzeige (PDF)", "Lebenslauf (PDF)",
     ]
@@ -74,18 +80,30 @@ def test_initial_view_and_mode_dependent_labels(ui):
     assert [item.proto.label for item in at.get("file_uploader")] == [
         "Ausschreibung (PDF)", "Firmenprofil (PDF)",
     ]
-    at.button[0].click().run()
-    assert "folgt noch" in at.info[0].value
-    assert at.button[1].disabled
+    prepare_example(at)
+    assert not at.get("file_uploader")
+    assert not at.button(key="analyze_button").disabled
+    assert any("tender_anforderungen.pdf" in item.value for item in at.markdown)
+    analyze.assert_not_called()
+
+
+def test_open_session_from_previous_version_keeps_example_inputs_without_starting(ui):
+    at, analyze = ui
+    at.session_state["use_example"] = True
+    at.run()
+    assert not at.exception
+    assert at.session_state["use_example"] == (True, True)
+    assert not at.button(key="analyze_button").disabled
+    assert not at.get("file_uploader")
     analyze.assert_not_called()
 
 
 def test_example_analysis_progress_download_and_rerun(ui, result):
     at, analyze = ui
-    at.button[0].click().run()
-    assert not at.button[1].disabled
+    prepare_example(at)
+    assert not at.button(key="analyze_button").disabled
     assert any("job_anforderungen.pdf" in item.value for item in at.markdown)
-    at.button[1].click().run()
+    at.button(key="analyze_button").click().run()
     assert not at.exception
     assert not at.error
     args = analyze.call_args.args
@@ -97,21 +115,21 @@ def test_example_analysis_progress_download_and_rerun(ui, result):
     assert at.session_state["analysis_meta"]["duration_seconds"] >= 0
     assert at.status[0].state == "complete"
     assert [item.value for item in at.status[0].markdown] == list(app.STAGES.values())
-    assert [item.proto.label for item in at.get("download_button")] == ["Markdown", "JSON"]
+    assert [item.proto.label for item in at.get("download_button")] == ["Stellenanzeige ansehen", "Lebenslauf ansehen", "Als Markdown exportieren", "Als JSON exportieren"]
     assert any("Muss-Kriterien" in item.value and "1/1" in item.value for item in at.markdown)
     at.run()
     analyze.assert_called_once()
     at.get("button_group")[0].set_value("tender").run()
     assert "result" not in at.session_state
     assert "analysis_meta" not in at.session_state
-    assert not at.get("download_button")
-    assert at.button[1].disabled
+    assert not [item for item in at.get("download_button") if "exportieren" in item.proto.label]
+    assert at.button(key="analyze_button").disabled
 
 
 def test_results_do_not_leak_between_sessions(ui):
     at, _ = ui
-    at.button[0].click().run()
-    at.button[1].click().run()
+    prepare_example(at)
+    at.button(key="analyze_button").click().run()
     other = live_app()
     assert "result" in at.session_state
     assert "result" not in other.session_state
@@ -139,10 +157,10 @@ def test_results_do_not_leak_between_sessions(ui):
 ])
 def test_errors_are_friendly_and_clear_old_result(ui, caplog, error, expected):
     at, analyze = ui
-    at.button[0].click().run()
-    at.button[1].click().run()
+    prepare_example(at)
+    at.button(key="analyze_button").click().run()
     analyze.side_effect = error
-    at.button[1].click().run()
+    at.button(key="analyze_button").click().run()
     assert not at.exception
     assert expected in at.error[0].value
     assert "PRIVATE" not in at.error[0].value
@@ -150,7 +168,7 @@ def test_errors_are_friendly_and_clear_old_result(ui, caplog, error, expected):
     assert at.status[0].state == "error"
     assert "result" not in at.session_state
     assert "analysis_meta" not in at.session_state
-    assert not at.get("download_button")
+    assert not [item for item in at.get("download_button") if "exportieren" in item.proto.label]
 
 
 def test_model_load_failure_does_not_show_exception(monkeypatch, live_access):
@@ -164,8 +182,8 @@ def test_model_load_failure_does_not_show_exception(monkeypatch, live_access):
 def test_missing_example_files_are_handled(ui, monkeypatch, tmp_path):
     at, analyze = ui
     monkeypatch.setattr(app, "EXAMPLES_DIR", tmp_path)
-    at.button[0].click().run()
-    at.button[1].click().run()
+    prepare_example(at)
+    at.button(key="analyze_button").click().run()
     assert not at.exception
     assert "Beispieldateien" in at.error[0].value
     analyze.assert_not_called()
@@ -184,10 +202,10 @@ def test_upload_change_invalidates_example_and_result(monkeypatch, result):
         __getattr__ = dict.__getitem__
         __setattr__ = dict.__setitem__
     state = State(result=result, analysis_meta={"duration_seconds": 10}, result_filter="Lücken",
-                  use_example=True, example_notice=True)
+                  use_example=(False, True))
     monkeypatch.setattr(app.st, "session_state", state)
     app.change_upload()
-    assert state == {"use_example": False, "example_notice": False}
+    assert state == {"use_example": (False, True)}
 
 
 @pytest.mark.parametrize("score,color", [(0, "red"), (49, "red"), (50, "yellow"), (74, "yellow"), (75, "green"), (100, "green")])
@@ -317,8 +335,8 @@ def test_filter_reruns_keep_full_result_and_exports(ui, result, monkeypatch):
         downloads.append((args[0], kwargs["data"]))
         return original_download(*args, **kwargs)
     monkeypatch.setattr(app.st, "download_button", record_download)
-    at.button[0].click().run()
-    at.button[1].click().run()
+    prepare_example(at)
+    at.button(key="analyze_button").click().run()
     at.get("button_group")[1].set_value("Lücken").run()
     assert not at.exception
     analyze.assert_called_once()
@@ -326,8 +344,8 @@ def test_filter_reruns_keep_full_result_and_exports(ui, result, monkeypatch):
     table = next(item.value for item in at.markdown if 'class="ac-table"' in item.value)
     assert "Python entwickeln" not in table
     assert "Projekte leiten" in table
-    assert "## R1" in dict(downloads[-2:])["Markdown"]
-    assert json.loads(dict(downloads[-2:])["JSON"]) == result
+    assert "## R1" in dict(downloads[-2:])["Als Markdown exportieren"]
+    assert json.loads(dict(downloads[-2:])["Als JSON exportieren"]) == result
 
 
 def test_cost_uses_separate_models_and_cache_categories():
@@ -352,8 +370,8 @@ def test_analysis_metadata_is_measured_without_changing_result(ui, result, monke
         llm._capture_response_usage("claude-sonnet-5-5", SimpleNamespace(input_tokens=1000, output_tokens=500))
         return copy.deepcopy(result)
     analyze.side_effect = measured
-    at.button[0].click().run()
-    at.button[1].click().run()
+    prepare_example(at)
+    at.button(key="analyze_button").click().run()
     assert not at.exception
     assert at.session_state["result"] == result
     metadata = at.session_state["analysis_meta"]
@@ -392,14 +410,14 @@ def test_public_view_has_demo_but_no_upload_model_or_analysis(monkeypatch, live_
     assert not at.error
     assert at.info[0].value == app.INVITATION_NOTICE
     assert not at.get("file_uploader")
-    assert at.button[0].disabled
-    assert len(at.get("download_button")) == 2
+    assert not any(button.key == "analyze_button" for button in at.button)
+    assert len(at.get("download_button")) == 4
     assert any("Beispielergebnis" in item.value for item in at.markdown)
-    assert any("68" in item.value and 'class="ac-metrics"' in item.value for item in at.markdown)
-    at.button[0].click().run()  # Auch ein simulierter Klick darf nichts starten.
-    at.get("button_group")[0].set_value("Lücken").run()
+    assert at.get("button_group")[0].value == "tender"
+    assert any("50" in item.value and 'class="ac-metrics"' in item.value for item in at.markdown)
+    at.get("button_group")[1].set_value("Lücken").run()
     assert not at.exception
-    assert at.get("button_group")[0].value == "Lücken"
+    assert at.get("button_group")[1].value == "Lücken"
     analyze.assert_not_called()
     model.assert_not_called()
     assert "test-invitation" not in caplog.text
@@ -414,7 +432,7 @@ def test_valid_link_cannot_unlock_without_environment_code(monkeypatch, live_acc
     monkeypatch.setattr(app, "load_model", model)
     at = live_app()
     assert not at.exception
-    assert at.button[0].disabled
+    assert not any(button.key == "analyze_button" for button in at.button)
     assert not at.get("file_uploader")
     model.assert_not_called()
 
@@ -424,8 +442,8 @@ def test_invitation_survives_rerun_but_revocation_clears_private_result(ui, monk
     at.query_params.clear()
     at.run()
     assert len(at.get("file_uploader")) == 2
-    at.button[0].click().run()
-    at.button[1].click().run()
+    prepare_example(at)
+    at.button(key="analyze_button").click().run()
     assert "result" in at.session_state
     monkeypatch.delenv("ACCESS_CODE")
     at.run()
@@ -443,17 +461,17 @@ def test_five_live_analyses_then_click_reports_limit_without_disabling(ui, resul
         before_api_request(None)
         return copy.deepcopy(result)
     analyze.side_effect = started
-    at.button[0].click().run()
+    prepare_example(at)
     for _ in range(5):
-        at.button[1].click().run()
+        at.button(key="analyze_button").click().run()
         assert not at.exception
     assert at.session_state["access_session"].analyses == 5
     assert app.get_limits().daily_count == 5
-    assert not at.button[1].disabled
+    assert not at.button(key="analyze_button").disabled
     assert not at.info
-    at.button[1].click().run()
+    at.button(key="analyze_button").click().run()
     assert any(item.value == "Das Analyse-Limit für diese Sitzung ist erreicht. Danke fürs Ausprobieren!" for item in at.info)
-    assert not at.button[1].disabled
+    assert not at.button(key="analyze_button").disabled
     assert analyze.call_count == 5
     assert at.session_state["result"] == result
 
@@ -487,7 +505,7 @@ def test_server_gate_blocks_direct_start_without_authorization(monkeypatch, live
 
 
 def test_example_schema_error_is_friendly_and_does_not_disclose_contents(monkeypatch, live_access, caplog):
-    def invalid_example():
+    def invalid_example(mode):
         return app.AnalysisResult.model_validate({"PRIVATE_FIELD": "PRIVATE_DOCUMENT"})
     monkeypatch.setattr(app, "load_example_result", invalid_example)
     at = AppTest.from_string("import app\napp.main()").run()
@@ -507,17 +525,17 @@ def test_api_failures_after_start_consume_quota(ui, caplog):
         before_api_request(None)
         raise llm.LlmApiError("timeout")
     analyze.side_effect = failed
-    at.button[0].click().run()
+    prepare_example(at)
     for _ in range(5):
-        at.button[1].click().run()
+        at.button(key="analyze_button").click().run()
         assert not at.exception
         assert "zu lange" in at.error[0].value
     assert at.session_state["access_session"].analyses == 5
     assert app.get_limits().daily_count == 5
     at.run()
-    assert not at.button[1].disabled
+    assert not at.button(key="analyze_button").disabled
     assert not at.info
-    at.button[1].click().run()
+    at.button(key="analyze_button").click().run()
     assert any("Analyse-Limit für diese Sitzung" in item.value for item in at.info)
     assert analyze.call_count == 5
     assert "test-invitation" not in caplog.text
@@ -533,10 +551,10 @@ def test_global_daily_limit_blocks_another_session(ui):
         session.refresh("test-invitation")
         with limits.analysis(session):
             before_api_request(None)
-    at.button[0].click().run()
-    assert not at.button[1].disabled
+    prepare_example(at)
+    assert not at.button(key="analyze_button").disabled
     assert not at.info
-    at.button[1].click().run()
+    at.button(key="analyze_button").click().run()
     assert any("tägliche Analyse-Limit" in item.value for item in at.info)
     analyze.assert_not_called()
     assert at.session_state["access_session"].analyses == 0
@@ -550,14 +568,14 @@ def test_ambiguous_invitation_link_is_locked(monkeypatch, live_access):
     at.run()
     assert not at.exception
     assert not at.get("file_uploader")
-    assert at.button[0].disabled
+    assert not any(button.key == "analyze_button" for button in at.button)
     model.assert_not_called()
 
 
 def test_rerun_during_analysis_never_renders_a_busy_lock(ui):
     from contextvars import Context
     at, analyze = ui
-    at.button[0].click().run()
+    prepare_example(at)
     session = at.session_state["access_session"]
     context = Context()
     manager = app.get_limits().analysis(session)
@@ -565,19 +583,19 @@ def test_rerun_during_analysis_never_renders_a_busy_lock(ui):
     try:
         at.run()
         assert not at.exception
-        assert not at.button[1].disabled
+        assert not at.button(key="analyze_button").disabled
         assert not any("Gerade werden bereits" in item.value for item in at.info)
     finally:
         context.run(manager.__exit__, None, None, None)
-    assert not at.button[1].disabled
+    assert not at.button(key="analyze_button").disabled
     analyze.assert_not_called()
 
 
 def test_double_click_is_rejected_only_on_click_and_keeps_last_result(ui, result):
     from contextvars import Context
     at, analyze = ui
-    at.button[0].click().run()
-    at.button[1].click().run()
+    prepare_example(at)
+    at.button(key="analyze_button").click().run()
     session = at.session_state["access_session"]
     context = Context()
     manager = app.get_limits().analysis(session)
@@ -585,17 +603,17 @@ def test_double_click_is_rejected_only_on_click_and_keeps_last_result(ui, result
     try:
         at.run()
         assert not at.info
-        assert not at.button[1].disabled
-        at.button[1].click().run()
+        assert not at.button(key="analyze_button").disabled
+        at.button(key="analyze_button").click().run()
         assert not at.exception
         assert any("Gerade werden bereits" in item.value for item in at.info)
-        assert not at.button[1].disabled
+        assert not at.button(key="analyze_button").disabled
         assert at.session_state["result"] == result
         assert app.get_limits().daily_count == 0
         analyze.assert_called_once()
     finally:
         context.run(manager.__exit__, None, None, None)
-    at.button[1].click().run()
+    at.button(key="analyze_button").click().run()
     assert not at.exception
     assert not at.info
     assert analyze.call_count == 2
@@ -605,7 +623,7 @@ def test_busy_global_pool_does_not_disable_button_on_page_build(ui):
     from contextvars import Context
     from copilot.access import SessionAccess
     at, analyze = ui
-    at.button[0].click().run()
+    prepare_example(at)
     held = []
     try:
         for _ in range(2):
@@ -616,9 +634,9 @@ def test_busy_global_pool_does_not_disable_button_on_page_build(ui):
             context.run(manager.__enter__)
             held.append((context, manager))
         at.run()
-        assert not at.button[1].disabled
+        assert not at.button(key="analyze_button").disabled
         assert not at.info
-        at.button[1].click().run()
+        at.button(key="analyze_button").click().run()
         assert not at.exception
         assert any("Gerade werden bereits" in item.value for item in at.info)
         analyze.assert_not_called()
@@ -629,15 +647,15 @@ def test_busy_global_pool_does_not_disable_button_on_page_build(ui):
 
 def test_pipeline_exception_releases_slot_for_next_click(ui, result):
     at, analyze = ui
-    at.button[0].click().run()
+    prepare_example(at)
     analyze.side_effect = RuntimeError("PRIVATE")
-    at.button[1].click().run()
+    at.button(key="analyze_button").click().run()
     assert not at.exception
     assert at.error
-    assert not at.button[1].disabled
+    assert not at.button(key="analyze_button").disabled
     analyze.side_effect = None
     analyze.return_value = result
-    at.button[1].click().run()
+    at.button(key="analyze_button").click().run()
     assert not at.exception
     assert not at.error
     assert not at.info
@@ -650,17 +668,17 @@ def test_expired_analysis_cannot_overwrite_previous_result(ui, result, monkeypat
     limits = AnalysisLimits(monotonic_clock=lambda: now[0])
     monkeypatch.setattr(app, "get_limits", lambda: limits)
     at, analyze = ui
-    at.button[0].click().run()
-    at.button[1].click().run()
+    prepare_example(at)
+    at.button(key="analyze_button").click().run()
     def expired(*args, **kwargs):
         now[0] += limits.lease_seconds + 1
         return {**copy.deepcopy(result), "summary": {**result["summary"], "fazit": "Veraltete Antwort"}}
     analyze.side_effect = expired
-    at.button[1].click().run()
+    at.button(key="analyze_button").click().run()
     assert not at.exception
     assert any("abgelaufen" in item.value for item in at.info)
     assert at.session_state["result"] == result
-    assert not at.button[1].disabled
+    assert not at.button(key="analyze_button").disabled
 
 
 def test_streamlit_rerun_from_inside_pipeline_releases_place(ui, result):
@@ -672,13 +690,13 @@ def test_streamlit_rerun_from_inside_pipeline_releases_place(ui, result):
             app.st.rerun()
         return result
     analyze.side_effect = rerun_once
-    at.button[0].click().run()
-    at.button[1].click().run()
+    prepare_example(at)
+    at.button(key="analyze_button").click().run()
     assert not at.exception
-    assert not at.button[1].disabled
+    assert not at.button(key="analyze_button").disabled
     assert not at.info
     assert len(attempts) == 1
-    at.button[1].click().run()
+    at.button(key="analyze_button").click().run()
     assert not at.exception
     assert not at.info
     assert at.session_state["result"] == result

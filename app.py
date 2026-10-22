@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import html
+import hashlib
 import json
 import math
 import logging
@@ -39,6 +40,8 @@ STAGES = {
 }
 STATUS_LABELS = {"erfuellt": "erfüllt", "teilweise": "teilweise", "nicht_belegt": "nicht belegt"}
 INVITATION_NOTICE = "Die Live-Analyse ist auf eingeladene Besucher begrenzt. Unten siehst du ein vollständiges Beispielergebnis."
+SAVED_EXAMPLE_NOTICE = "Gespeichertes Beispielergebnis, für eine Live-Analyse wird ein Zugangscode benötigt"
+PUBLIC_MODES = {"tender": "Ausschreibung", "job": "Stellenanzeige"}
 logger = logging.getLogger(__name__)
 
 
@@ -78,9 +81,33 @@ def access_session() -> SessionAccess:
     return session
 
 
-def load_example_result() -> dict[str, Any]:
-    text = (EXAMPLES_DIR / "result_job.json").read_text(encoding="utf-8-sig")
-    return AnalysisResult.model_validate_json(text).model_dump()
+def example_paths(mode: str) -> tuple[Path, Path]:
+    if mode not in MODES:
+        raise ValueError("Unbekannter Beispielmodus.")
+    return EXAMPLES_DIR / f"{mode}_anforderungen.pdf", EXAMPLES_DIR / f"{mode}_profil.pdf"
+
+
+def load_example_result(mode: str = "tender") -> dict[str, Any]:
+    example_paths(mode)
+    text = (EXAMPLES_DIR / f"result_{mode}.json").read_text(encoding="utf-8-sig")
+    result = AnalysisResult.model_validate_json(text).model_dump()
+    if result["mode"] != mode:
+        raise ValueError("Beispielmodus stimmt nicht überein.")
+    return result
+
+
+def load_example_metadata(mode: str) -> dict[str, Any] | None:
+    """Nur Messwerte anzeigen, die exakt zum gespeicherten Ergebnis gehören."""
+    example_paths(mode)
+    try:
+        data = (EXAMPLES_DIR / f"result_{mode}.json").read_bytes()
+        metadata = json.loads((EXAMPLES_DIR / f"result_{mode}.meta.json").read_text(encoding="utf-8"))
+        # Git kann auf Windows LF in CRLF umwandeln; der JSON-Inhalt bleibt gleich.
+        if metadata["mode"] == mode and metadata["result_sha256"] == hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest():
+            return metadata
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
 
 
 def run_live_analysis(requirements_upload, profile_upload, mode, use_example, *, on_progress):
@@ -89,7 +116,7 @@ def run_live_analysis(requirements_upload, profile_upload, mode, use_example, *,
     with get_limits().analysis(session) as permit:
         if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
             raise MissingApiKeyError("ANTHROPIC_API_KEY ist nicht gesetzt.")
-        documents = read_documents(requirements_upload, profile_upload, use_example)
+        documents = read_documents(requirements_upload, profile_upload, use_example, mode)
         try:
             result = pipeline.analyze(*documents, mode, on_progress=on_progress)
         except Exception:
@@ -169,7 +196,10 @@ def status_badge(item: dict[str, Any]) -> str:
             f'{_escape(label)}</span>')
 
 
-def render_dashboard_html(result: dict[str, Any], metadata: dict[str, Any] | None = None) -> str:
+def render_dashboard_html(result: dict[str, Any], metadata: dict[str, Any] | None = None, *, example: bool = False) -> str:
+    measurement_note = "Für diese Analyse"
+    if example:
+        measurement_note = "gemessen beim Erstellen des Beispiels" if metadata else "Messwerte nicht verfügbar"
     summary = result["summary"]
     score = max(0, min(100, int(summary["score"])))
     ring_color = {"green": "#339265", "yellow": "#c4932e", "red": "#c4635c"}[score_color(score)]
@@ -204,7 +234,7 @@ def render_dashboard_html(result: dict[str, Any], metadata: dict[str, Any] | Non
         '<div class="ac-metric"><div class="ac-metric-label">Dauer &amp; Kosten</div>'
         f'<div class="ac-time">{_escape(format_duration(metadata))}</div>'
         f'<div class="ac-cost"><span>{_escape(format_cost(metadata))}</span><small>API-Kosten</small></div>'
-        '<div class="ac-metric-note">Für diese Analyse</div></div></div>'
+        f'<div class="ac-metric-note">{_escape(measurement_note)}</div></div></div>'
         '<div class="ac-verdict"><div class="ac-verdict-label">Fazit</div>'
         f'<p>{_escape(summary["fazit"])}</p></div></section>'
     )
@@ -338,35 +368,65 @@ def clear_result() -> None:
 
 def change_mode() -> None:
     clear_result()
-    st.session_state.use_example = False
-    st.session_state.example_notice = False
+    st.session_state.use_example = (False, False)
+    st.session_state.pop("start_example_analysis", None)
     st.session_state.upload_generation += 1
 
 
 def change_upload() -> None:
     clear_result()
-    st.session_state.use_example = False
-    st.session_state.example_notice = False
+
+
+def use_own_document(side: int) -> None:
+    clear_result()
+    sources = list(st.session_state.use_example)
+    sources[side] = False
+    st.session_state.use_example = tuple(sources)
+    st.session_state.pop("start_example_analysis", None)
 
 
 def select_example() -> None:
-    if st.session_state.mode == "tender":
-        st.session_state.example_notice = True
-        return
     clear_result()
-    st.session_state.use_example = True
-    st.session_state.example_notice = False
+    st.session_state.use_example = (True, True)
+    # Einmaliger Startwunsch; vor der Analyse konsumieren, niemals bei Rerun erneut.
+    st.session_state.start_example_analysis = True
     # Neue Widget-Keys leeren alte Uploads vor dem nächsten Rendern.
     st.session_state.upload_generation += 1
 
 
-def read_documents(requirements_upload, profile_upload, use_example: bool) -> tuple[bytes, bytes]:
-    if use_example:
-        return (
-            (EXAMPLES_DIR / "job_anforderungen.pdf").read_bytes(),
-            (EXAMPLES_DIR / "job_profil.pdf").read_bytes(),
-        )
-    return requirements_upload.getvalue(), profile_upload.getvalue()
+def read_documents(requirements_upload, profile_upload, use_example: bool | tuple[bool, bool], mode: str = "job") -> tuple[bytes, bytes]:
+    sources = (use_example, use_example) if isinstance(use_example, bool) else use_example
+    paths = example_paths(mode)
+    return tuple(path.read_bytes() if selected else upload.getvalue()
+                 for path, upload, selected in zip(paths, (requirements_upload, profile_upload), sources))
+
+
+def render_pdf_download(mode: str, side: int, *, key: str) -> None:
+    path = example_paths(mode)[side]
+    try:
+        data = path.read_bytes()
+    except OSError:
+        st.caption("Beispiel-PDF momentan nicht verfügbar.")
+        return
+    st.download_button(f"{UPLOAD_LABELS[mode][side]} ansehen", data=data,
+                       file_name=path.name, mime="application/pdf", key=key,
+                       type="tertiary", on_click="ignore")
+
+
+def render_example_document(mode: str, side: int) -> None:
+    path = example_paths(mode)[side]
+    st.markdown(
+        f'<div class="ac-example-label">{_escape(UPLOAD_LABELS[mode][side])} (PDF)</div>'
+        f'<div class="ac-example-document">{FILE_SVG}<div><strong>{_escape(path.name)}</strong>'
+        '<span class="ac-example-badge">Beispiel</span></div></div>', unsafe_allow_html=True,
+    )
+    render_pdf_download(mode, side, key=f"input_pdf_{side}")
+    st.button("Eigene Datei verwenden", key=f"own_document_{side}", type="tertiary",
+              on_click=use_own_document, args=(side,))
+
+
+def change_public_example() -> None:
+    st.session_state.pop("result_filter", None)
 
 
 
@@ -375,23 +435,23 @@ def render_result_panel(result: dict[str, Any], metadata=None, *, example: bool 
     st.markdown(f'<div class="ac-section-title"><h2>{_escape(heading)}</h2>'
                 f'<span>{_escape(len(result["requirements"]))} Anforderungen geprüft</span></div>',
                 unsafe_allow_html=True)
-    st.markdown(render_dashboard_html(result, metadata), unsafe_allow_html=True)
+    st.markdown(render_dashboard_html(result, metadata, example=example), unsafe_allow_html=True)
     st.markdown('<div class="ac-section-title"><h2>Anforderungen im Detail</h2>'
                 '<span>Nach Priorität sortiert</span></div>', unsafe_allow_html=True)
     selected_filter = st.segmented_control(
         "Anforderungen filtern", FILTERS, default="Alle", required=True, key="result_filter",
         label_visibility="collapsed", width=264,
     )
-    st.markdown(render_requirements_html(result, selected_filter), unsafe_allow_html=True)
-    with st.container(key="export_actions", horizontal=True, gap="small"):
+    with st.container(key="export_actions", horizontal=True, horizontal_alignment="right", gap="small"):
         st.download_button(
-            "Markdown", data=result_markdown(result), file_name="anforderungs-check.md",
+            "Als Markdown exportieren", data=result_markdown(result), file_name="anforderungs-check.md",
             mime="text/markdown; charset=utf-8", on_click="ignore",
         )
         st.download_button(
-            "JSON", data=json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False),
+            "Als JSON exportieren", data=json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False),
             file_name="anforderungs-check.json", mime="application/json", on_click="ignore",
         )
+    st.markdown(render_requirements_html(result, selected_filter), unsafe_allow_html=True)
 
 
 def render_footer() -> None:
@@ -418,27 +478,39 @@ def main() -> None:
         '</span></div></section>', unsafe_allow_html=True,
     )
 
-    for key, value in (("upload_generation", 0), ("use_example", False), ("example_notice", False)):
+    for key, value in (("upload_generation", 0), ("use_example", (False, False))):
         st.session_state.setdefault(key, value)
+    # Bereits offene Sitzungen der vorherigen Version übernehmen.
+    if isinstance(st.session_state.use_example, bool):
+        st.session_state.use_example = (st.session_state.use_example,) * 2
     session = access_session()
     if not session.authorized:
         if st.session_state.pop("live_authorized", False) or st.session_state.get("result") is not None:
             clear_result()
-        st.session_state.use_example = False
-        st.session_state.example_notice = False
+        st.session_state.use_example = (False, False)
+        st.session_state.pop("start_example_analysis", None)
         for key in list(st.session_state):
             if key.startswith(("requirements_", "profile_")):
                 st.session_state.pop(key, None)
         with st.container(key="input_card"):
             st.info(INVITATION_NOTICE)
-            st.button("Analysieren", key="analyze_button", type="primary", disabled=True, width="stretch")
+        with st.container(key="public_example_card"):
+            public_mode = st.segmented_control(
+                "Beispiel auswählen", options=list(PUBLIC_MODES), format_func=PUBLIC_MODES.get,
+                default="tender", required=True, key="public_example_mode",
+                on_change=change_public_example, label_visibility="collapsed", width="stretch",
+            )
+            st.caption(SAVED_EXAMPLE_NOTICE)
+            with st.container(horizontal=True, gap="medium"):
+                render_pdf_download(public_mode, 0, key="public_requirements_pdf")
+                render_pdf_download(public_mode, 1, key="public_profile_pdf")
         try:
-            example_result = load_example_result()
+            example_result = load_example_result(public_mode)
         except Exception as error:
             logger.warning("error_type=%s", type(error).__name__)
             st.error("Das Beispielergebnis konnte nicht geladen werden. Bitte versuche es später erneut.")
         else:
-            render_result_panel(example_result, example=True)
+            render_result_panel(example_result, load_example_metadata(public_mode), example=True)
         render_footer()
         return
 
@@ -462,40 +534,36 @@ def main() -> None:
         labels = UPLOAD_LABELS[mode]
         generation = st.session_state.upload_generation
         with st.container(key="step_documents"):
-            render_step(2, "Dokumente hinzufügen")
+            with st.container(key="document_heading", horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
+                render_step(2, "Dokumente hinzufügen")
+                st.button("Beispiel laden", key="example_button", type="tertiary", on_click=select_example,
+                          help="Startet eine Live-Analyse mit den fiktiven Beispiel-PDFs und zählt gegen die Analyse-Limits.")
+            uploads = [None, None]
             with st.container(key="document_uploads"):
                 left, right = st.columns(2, gap="medium")
-                with left:
-                    requirements_upload = st.file_uploader(
-                        f"{labels[0]} (PDF)", type=["pdf"], key=f"requirements_{generation}",
-                        on_change=change_upload, help="Eine PDF-Datei, maximal 5 MB.",
-                    )
-                    if st.session_state.use_example:
-                        st.markdown(render_file_note("job_anforderungen.pdf"), unsafe_allow_html=True)
-                    elif requirements_upload is not None:
-                        st.markdown(render_file_note(requirements_upload.name), unsafe_allow_html=True)
-                with right:
-                    profile_upload = st.file_uploader(
-                        f"{labels[1]} (PDF)", type=["pdf"], key=f"profile_{generation}",
-                        on_change=change_upload, help="Eine PDF-Datei, maximal 5 MB.",
-                    )
-                    if st.session_state.use_example:
-                        st.markdown(render_file_note("job_profil.pdf"), unsafe_allow_html=True)
-                    elif profile_upload is not None:
-                        st.markdown(render_file_note(profile_upload.name), unsafe_allow_html=True)
-            st.button("Beispiel laden", key="example_button", type="secondary", on_click=select_example)
-            if st.session_state.example_notice:
-                st.info("Das Beispiel für Ausschreibung und Firmenprofil folgt noch.")
-            if st.session_state.use_example:
-                st.caption("Fiktive Beispieldateien ausgewählt. Du kannst die Analyse jetzt starten.")
+                for side, column in enumerate((left, right)):
+                    with column:
+                        if st.session_state.use_example[side]:
+                            render_example_document(mode, side)
+                        else:
+                            prefix = "requirements" if side == 0 else "profile"
+                            uploads[side] = st.file_uploader(
+                                f"{labels[side]} (PDF)", type=["pdf"], key=f"{prefix}_{generation}",
+                                on_change=change_upload, help="Eine PDF-Datei, maximal 5 MB.",
+                            )
+                            if uploads[side] is not None:
+                                st.markdown(render_file_note(uploads[side].name), unsafe_allow_html=True)
+            requirements_upload, profile_upload = uploads
+            if any(st.session_state.use_example):
+                st.caption("Fiktive Beispieldateien. Jede Live-Analyse zählt gegen die Analyse-Limits.")
 
         with st.container(key="step_analyze"):
             render_step(3, "Anforderungen prüfen")
-            ready = st.session_state.use_example or (
-                requirements_upload is not None and profile_upload is not None
-            )
+            ready = all(selected or upload is not None
+                        for selected, upload in zip(st.session_state.use_example, uploads))
+            start_example = st.session_state.pop("start_example_analysis", False)
             clicked = st.button("Analysieren", key="analyze_button", type="primary", disabled=not ready, width="stretch")
-            if clicked and ready:
+            if (clicked or start_example) and ready:
                 with st.status("Analyse wird vorbereitet …", expanded=True) as status:
                     started = perf_counter()
                     try:
