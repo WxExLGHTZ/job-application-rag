@@ -534,10 +534,7 @@ def main() -> None:
         labels = UPLOAD_LABELS[mode]
         generation = st.session_state.upload_generation
         with st.container(key="step_documents"):
-            with st.container(key="document_heading", horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
-                render_step(2, "Dokumente hinzufügen")
-                st.button("Beispiel laden", key="example_button", type="tertiary", on_click=select_example,
-                          help="Startet eine Live-Analyse mit den fiktiven Beispiel-PDFs und zählt gegen die Analyse-Limits.")
+            render_step(2, "Dokumente hinzufügen")
             uploads = [None, None]
             with st.container(key="document_uploads"):
                 left, right = st.columns(2, gap="medium")
@@ -554,6 +551,8 @@ def main() -> None:
                             if uploads[side] is not None:
                                 st.markdown(render_file_note(uploads[side].name), unsafe_allow_html=True)
             requirements_upload, profile_upload = uploads
+            st.button("Beispiel laden", key="example_button", type="secondary", on_click=select_example,
+                      help="Startet eine Live-Analyse mit den fiktiven Beispiel-PDFs und zählt gegen die Analyse-Limits.")
             if any(st.session_state.use_example):
                 st.caption("Fiktive Beispieldateien. Jede Live-Analyse zählt gegen die Analyse-Limits.")
 
