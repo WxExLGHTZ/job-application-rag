@@ -437,7 +437,7 @@ def test_invitation_survives_rerun_but_revocation_clears_private_result(ui, monk
     analyze.assert_called_once()
 
 
-def test_five_live_analyses_then_disabled_with_exact_limit_message(ui, result):
+def test_five_live_analyses_then_click_reports_limit_without_disabling(ui, result):
     at, analyze = ui
     def started(*args, **kwargs):
         before_api_request(None)
@@ -449,9 +449,11 @@ def test_five_live_analyses_then_disabled_with_exact_limit_message(ui, result):
         assert not at.exception
     assert at.session_state["access_session"].analyses == 5
     assert app.get_limits().daily_count == 5
-    assert at.button[1].disabled
-    assert any(item.value == "Das Analyse-Limit für diese Sitzung ist erreicht. Danke fürs Ausprobieren!" for item in at.info)
+    assert not at.button[1].disabled
+    assert not at.info
     at.button[1].click().run()
+    assert any(item.value == "Das Analyse-Limit für diese Sitzung ist erreicht. Danke fürs Ausprobieren!" for item in at.info)
+    assert not at.button[1].disabled
     assert analyze.call_count == 5
     assert at.session_state["result"] == result
 
@@ -512,9 +514,12 @@ def test_api_failures_after_start_consume_quota(ui, caplog):
         assert "zu lange" in at.error[0].value
     assert at.session_state["access_session"].analyses == 5
     assert app.get_limits().daily_count == 5
-    assert any("Analyse-Limit für diese Sitzung" in item.value for item in at.info)
     at.run()
-    assert at.button[1].disabled
+    assert not at.button[1].disabled
+    assert not at.info
+    at.button[1].click().run()
+    assert any("Analyse-Limit für diese Sitzung" in item.value for item in at.info)
+    assert analyze.call_count == 5
     assert "test-invitation" not in caplog.text
     assert "test-api-key" not in caplog.text
 
@@ -529,9 +534,10 @@ def test_global_daily_limit_blocks_another_session(ui):
         with limits.analysis(session):
             before_api_request(None)
     at.button[0].click().run()
-    assert at.button[1].disabled
-    assert any("tägliche Analyse-Limit" in item.value for item in at.info)
+    assert not at.button[1].disabled
+    assert not at.info
     at.button[1].click().run()
+    assert any("tägliche Analyse-Limit" in item.value for item in at.info)
     analyze.assert_not_called()
     assert at.session_state["access_session"].analyses == 0
 
@@ -546,3 +552,134 @@ def test_ambiguous_invitation_link_is_locked(monkeypatch, live_access):
     assert not at.get("file_uploader")
     assert at.button[0].disabled
     model.assert_not_called()
+
+
+def test_rerun_during_analysis_never_renders_a_busy_lock(ui):
+    from contextvars import Context
+    at, analyze = ui
+    at.button[0].click().run()
+    session = at.session_state["access_session"]
+    context = Context()
+    manager = app.get_limits().analysis(session)
+    context.run(manager.__enter__)
+    try:
+        at.run()
+        assert not at.exception
+        assert not at.button[1].disabled
+        assert not any("Gerade werden bereits" in item.value for item in at.info)
+    finally:
+        context.run(manager.__exit__, None, None, None)
+    assert not at.button[1].disabled
+    analyze.assert_not_called()
+
+
+def test_double_click_is_rejected_only_on_click_and_keeps_last_result(ui, result):
+    from contextvars import Context
+    at, analyze = ui
+    at.button[0].click().run()
+    at.button[1].click().run()
+    session = at.session_state["access_session"]
+    context = Context()
+    manager = app.get_limits().analysis(session)
+    context.run(manager.__enter__)
+    try:
+        at.run()
+        assert not at.info
+        assert not at.button[1].disabled
+        at.button[1].click().run()
+        assert not at.exception
+        assert any("Gerade werden bereits" in item.value for item in at.info)
+        assert not at.button[1].disabled
+        assert at.session_state["result"] == result
+        assert app.get_limits().daily_count == 0
+        analyze.assert_called_once()
+    finally:
+        context.run(manager.__exit__, None, None, None)
+    at.button[1].click().run()
+    assert not at.exception
+    assert not at.info
+    assert analyze.call_count == 2
+
+
+def test_busy_global_pool_does_not_disable_button_on_page_build(ui):
+    from contextvars import Context
+    from copilot.access import SessionAccess
+    at, analyze = ui
+    at.button[0].click().run()
+    held = []
+    try:
+        for _ in range(2):
+            session = SessionAccess()
+            session.refresh("test-invitation")
+            context = Context()
+            manager = app.get_limits().analysis(session)
+            context.run(manager.__enter__)
+            held.append((context, manager))
+        at.run()
+        assert not at.button[1].disabled
+        assert not at.info
+        at.button[1].click().run()
+        assert not at.exception
+        assert any("Gerade werden bereits" in item.value for item in at.info)
+        analyze.assert_not_called()
+    finally:
+        for context, manager in held:
+            context.run(manager.__exit__, None, None, None)
+
+
+def test_pipeline_exception_releases_slot_for_next_click(ui, result):
+    at, analyze = ui
+    at.button[0].click().run()
+    analyze.side_effect = RuntimeError("PRIVATE")
+    at.button[1].click().run()
+    assert not at.exception
+    assert at.error
+    assert not at.button[1].disabled
+    analyze.side_effect = None
+    analyze.return_value = result
+    at.button[1].click().run()
+    assert not at.exception
+    assert not at.error
+    assert not at.info
+    assert at.session_state["result"] == result
+
+
+def test_expired_analysis_cannot_overwrite_previous_result(ui, result, monkeypatch):
+    from copilot.access import AnalysisLimits
+    now = [0.0]
+    limits = AnalysisLimits(monotonic_clock=lambda: now[0])
+    monkeypatch.setattr(app, "get_limits", lambda: limits)
+    at, analyze = ui
+    at.button[0].click().run()
+    at.button[1].click().run()
+    def expired(*args, **kwargs):
+        now[0] += limits.lease_seconds + 1
+        return {**copy.deepcopy(result), "summary": {**result["summary"], "fazit": "Veraltete Antwort"}}
+    analyze.side_effect = expired
+    at.button[1].click().run()
+    assert not at.exception
+    assert any("abgelaufen" in item.value for item in at.info)
+    assert at.session_state["result"] == result
+    assert not at.button[1].disabled
+
+
+def test_streamlit_rerun_from_inside_pipeline_releases_place(ui, result):
+    at, analyze = ui
+    attempts = []
+    def rerun_once(*args, **kwargs):
+        attempts.append(True)
+        if len(attempts) == 1:
+            app.st.rerun()
+        return result
+    analyze.side_effect = rerun_once
+    at.button[0].click().run()
+    at.button[1].click().run()
+    assert not at.exception
+    assert not at.button[1].disabled
+    assert not at.info
+    assert len(attempts) == 1
+    at.button[1].click().run()
+    assert not at.exception
+    assert not at.info
+    assert at.session_state["result"] == result
+    assert len(attempts) == 2

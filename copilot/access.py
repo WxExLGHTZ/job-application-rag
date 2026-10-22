@@ -10,8 +10,11 @@ import hmac
 import logging
 import os
 from threading import BoundedSemaphore, RLock
+from time import monotonic
 from typing import Callable, Iterator
 from zoneinfo import ZoneInfo
+
+from copilot.runtime_config import analysis_lease_seconds
 
 
 SESSION_LIMIT = 5
@@ -45,6 +48,11 @@ class AnalysesBusy(AccessError):
         super().__init__("Gerade werden bereits Analysen ausgeführt. Bitte versuche es in einem Moment erneut.")
 
 
+class AnalysisExpired(AccessError):
+    def __init__(self):
+        super().__init__("Die Analyse ist abgelaufen. Bitte starte sie erneut.")
+
+
 def _configured_code() -> str | None:
     try:
         code = os.environ["ACCESS_CODE"]
@@ -60,13 +68,13 @@ def valid_code(code: str | None) -> bool:
 
 
 class SessionAccess:
-    """Eine Sitzung hält nur Freigabe-Fingerabdruck, Zähler und laufenden Aufruf."""
+    """Eine Sitzung hält Freigabe, Zähler und eine unveränderliche Besitzerkennung."""
 
     def __init__(self):
         self._lock = RLock()
         self._fingerprint: bytes | None = None
         self._analyses = 0
-        self._active: AnalysisPermit | None = None
+        self._owner = object()
 
     def refresh(self, code: str | None = None) -> bool:
         with self._lock:
@@ -95,10 +103,16 @@ class SessionAccess:
 class AnalysisLimits:
     """Ein Prozess teilt Lock, Tageszähler und zwei gleichzeitig belegbare Plätze."""
 
-    def __init__(self, *, clock: Callable[[], datetime] | None = None):
+    def __init__(
+        self, *, clock: Callable[[], datetime] | None = None,
+        monotonic_clock: Callable[[], float] | None = None,
+    ):
         self._clock = clock or (lambda: datetime.now(TIMEZONE))
+        self._monotonic = monotonic_clock or monotonic
+        self.lease_seconds = analysis_lease_seconds()
         self._lock = RLock()
         self._slots = BoundedSemaphore(CONCURRENT_LIMIT)
+        self._active: dict[object, AnalysisPermit] = {}
         self._day = self._today()
         self._daily_count = 0
 
@@ -127,32 +141,60 @@ class AnalysisLimits:
 
     def check_available(self, session: SessionAccess) -> None:
         with self._lock, session._lock:
+            self._expire_stale()
             self._available(session)
-            if session._active is not None:
+            if session._owner in self._active:
                 raise AnalysesBusy()
+
+    def _release(self, permit: AnalysisPermit) -> None:
+        """Nur die eigene Belegung genau einmal freigeben, auch nach Ablauf."""
+        with self._lock:
+            if self._active.get(permit.session._owner) is permit:
+                del self._active[permit.session._owner]
+                permit.closed = True
+                self._slots.release()
+
+    def _expire_stale(self) -> None:
+        now = self._monotonic()
+        for permit in list(self._active.values()):
+            if now >= permit.expires_at:
+                permit.expired = True
+                self._release(permit)
 
     @contextmanager
     def analysis(self, session: SessionAccess) -> Iterator[AnalysisPermit]:
         with self._lock, session._lock:
+            self._expire_stale()
             self._available(session)
-            if session._active is not None or not self._slots.acquire(blocking=False):
+            if session._owner in self._active:
                 raise AnalysesBusy()
             permit = AnalysisPermit(self, session)
-            session._active = permit
-        token = _CURRENT_ANALYSIS.set(permit)
+            if not self._slots.acquire(blocking=False):
+                raise AnalysesBusy()
+            try:
+                self._active[session._owner] = permit
+            except BaseException:
+                self._slots.release()
+                raise
+        token = None
         try:
+            token = _CURRENT_ANALYSIS.set(permit)
             yield permit
         finally:
-            _CURRENT_ANALYSIS.reset(token)
-            with self._lock, session._lock:
-                permit.closed = True
-                session._active = None
-                self._slots.release()
+            try:
+                if token is not None:
+                    _CURRENT_ANALYSIS.reset(token)
+            finally:
+                self._release(permit)
 
     def _check(self, permit: AnalysisPermit, *, start: bool) -> None:
         session = permit.session
         with self._lock, session._lock:
-            if permit.closed or session._active is not permit or not session.authorized:
+            self._expire_stale()
+            if permit.expired:
+                raise AnalysisExpired()
+            if (permit.closed or self._active.get(session._owner) is not permit
+                    or not session.authorized):
                 raise AccessDenied()
             if not permit.started:
                 self._available(session)
@@ -168,6 +210,8 @@ class AnalysisPermit:
         self.limits, self.session = limits, session
         self.started = False
         self.closed = False
+        self.expired = False
+        self.expires_at = limits._monotonic() + limits.lease_seconds
 
     def check(self, *, start: bool = False) -> None:
         self.limits._check(self, start=start)

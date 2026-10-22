@@ -264,3 +264,178 @@ def test_token_budget_rejection_never_charges_quota(sdk):
         llm.extract_requirements("x" * 100_000)
     assert not requests
     assert session.analyses == limits.daily_count == 0
+
+
+def test_context_reset_error_still_frees_the_same_slot():
+    limits, session = access.AnalysisLimits(), invited()
+    original = Context()
+    manager = limits.analysis(session)
+    original.run(manager.__enter__)
+    with pytest.raises(ValueError):
+        Context().run(manager.__exit__, None, None, None)
+    with limits.analysis(session), limits.analysis(invited()):
+        with pytest.raises(access.AnalysesBusy):
+            start(limits, invited())
+
+
+def test_expired_places_are_reclaimed_and_old_finally_cannot_release_replacement():
+    now = [0.0]
+    limits = access.AnalysisLimits(monotonic_clock=lambda: now[0])
+    session = invited()
+    old_context = Context()
+    old_manager = limits.analysis(session)
+    old = old_context.run(old_manager.__enter__)
+    now[0] = limits.lease_seconds - 0.001
+    with pytest.raises(access.AnalysesBusy):
+        start(limits, session)
+    now[0] = limits.lease_seconds
+    with limits.analysis(session) as replacement, limits.analysis(invited()):
+        assert old.expired and old.closed
+        with pytest.raises(access.AnalysisExpired):
+            old_context.run(access.before_api_request, None)
+        old_context.run(old_manager.__exit__, None, None, None)
+        replacement.check()
+        with pytest.raises(access.AnalysesBusy):
+            start(limits, invited())
+    assert limits.daily_count == session.analyses == 0
+
+
+def test_two_orphaned_places_both_recovered():
+    now = [0.0]
+    limits = access.AnalysisLimits(monotonic_clock=lambda: now[0])
+    held = []
+    try:
+        for _ in range(2):
+            context = Context()
+            manager = limits.analysis(invited())
+            context.run(manager.__enter__)
+            held.append((context, manager))
+        with pytest.raises(access.AnalysesBusy):
+            start(limits, invited())
+        now[0] += limits.lease_seconds + 1
+        with limits.analysis(invited()), limits.analysis(invited()):
+            with pytest.raises(access.AnalysesBusy):
+                start(limits, invited())
+    finally:
+        for context, manager in held:
+            context.run(manager.__exit__, None, None, None)
+
+
+def test_expiration_does_not_refund_a_started_analysis():
+    now = [0.0]
+    limits, session = access.AnalysisLimits(monotonic_clock=lambda: now[0]), invited()
+    with limits.analysis(session) as permit:
+        access.before_api_request(None)
+        now[0] += limits.lease_seconds
+        with pytest.raises(access.AnalysisExpired):
+            permit.check()
+    start(limits, session)
+    assert session.analyses == limits.daily_count == 2
+
+
+def test_expiration_uses_monotonic_time_not_the_day_reset_clock():
+    now = [datetime(2026, 10, 22, 12, tzinfo=timezone.utc)]
+    monotonic_now = [0.0]
+    limits = access.AnalysisLimits(clock=lambda: now[0], monotonic_clock=lambda: monotonic_now[0])
+    session = invited()
+    with limits.analysis(session) as permit:
+        now[0] = datetime(2026, 10, 23, 12, tzinfo=timezone.utc)
+        permit.check()
+        with pytest.raises(access.AnalysesBusy):
+            start(limits, session)
+        monotonic_now[0] = limits.lease_seconds
+        with pytest.raises(access.AnalysisExpired):
+            permit.check()
+
+
+def test_analysis_failure_after_first_request_releases_place_without_refunding_quota():
+    limits, session = access.AnalysisLimits(), invited()
+    with pytest.raises(RuntimeError):
+        with limits.analysis(session):
+            access.before_api_request(None)
+            raise RuntimeError("Test")
+    start(limits, session)
+    assert session.analyses == limits.daily_count == 2
+
+
+def test_concurrent_double_click_on_same_session_starts_only_one_analysis():
+    limits, session = access.AnalysisLimits(), invited()
+    ready, finish = Event(), Event()
+    def first_click():
+        with limits.analysis(session):
+            access.before_api_request(None)
+            ready.set()
+            assert finish.wait(timeout=5)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(first_click)
+        try:
+            assert ready.wait(timeout=5)
+            with pytest.raises(access.AnalysesBusy):
+                start(limits, session)
+            assert session.analyses == limits.daily_count == 1
+        finally:
+            finish.set()
+        first.result(timeout=10)
+    start(limits, session)
+    assert session.analyses == limits.daily_count == 2
+
+
+@pytest.mark.parametrize("timeout,retries,corrections,stages", [
+    (60, 1, 1, 2), (90, 2, 2, 3), (15, 0, 0, 1),
+])
+def test_lease_budget_tracks_all_runtime_settings(monkeypatch, timeout, retries, corrections, stages):
+    from copilot import runtime_config as config
+    monkeypatch.setattr(config, "API_TIMEOUT_SECONDS", timeout)
+    monkeypatch.setattr(config, "SDK_MAX_RETRIES", retries)
+    monkeypatch.setattr(config, "RESPONSE_CORRECTION_RETRIES", corrections)
+    monkeypatch.setattr(config, "ANALYSIS_API_STAGES", tuple(range(stages)))
+    longest_api_budget = stages * (1 + corrections) * (
+        (1 + retries) * timeout + retries * config.SDK_MAX_RETRY_WAIT_SECONDS
+    )
+    limits = access.AnalysisLimits()
+    assert limits.lease_seconds == longest_api_budget + 30
+    assert limits.lease_seconds > longest_api_budget
+
+
+def test_longest_sdk_and_correction_chain_fits_lease(sdk, monkeypatch, pdf_bytes):
+    import json
+    import numpy as np
+    from anthropic import _base_client
+    from copilot import index, pipeline, runtime_config as config
+    now, waits, attempts = [0.0], [], {}
+    monkeypatch.setenv("MODEL_EXTRACT", llm.DEFAULT_EXTRACT_MODEL)
+    monkeypatch.setenv("MODEL_ASSESS", llm.DEFAULT_ASSESS_MODEL)
+    def embed(texts):
+        return np.ones((len(texts), 2), dtype=np.float32)
+    monkeypatch.setattr(pipeline, "embed_texts", embed)
+    monkeypatch.setattr(index, "embed_texts", embed)
+    def sleep(seconds):
+        waits.append(seconds)
+        now[0] += seconds
+    monkeypatch.setattr(_base_client.time, "sleep", sleep)
+    def transport(request):
+        assert request.extensions["timeout"]["read"] == config.API_TIMEOUT_SECONDS
+        now[0] += config.API_TIMEOUT_SECONDS
+        model = json.loads(request.content)["model"]
+        attempts[model] = attempts.get(model, 0) + 1
+        if attempts[model] % (1 + config.SDK_MAX_RETRIES):
+            return httpx.Response(529, headers={"retry-after": str(config.SDK_MAX_RETRY_WAIT_SECONDS)},
+                                  json={"error": {"type": "overloaded_error", "message": "Test"}})
+        if attempts[model] < (1 + config.SDK_MAX_RETRIES) * (1 + config.RESPONSE_CORRECTION_RETRIES):
+            return sdk_response("kein JSON")
+        if model == llm.DEFAULT_EXTRACT_MODEL:
+            return sdk_response('[{"text":"SQL","typ":"muss"}]')
+        return sdk_response(json.dumps({"requirements": [{"id": "R1", "status": "nicht_belegt", "beleg": None,
+                              "begruendung": "Kein Beleg"}], "fazit": "Nachweis fehlt."}))
+    sdk(transport)
+    limits, session = access.AnalysisLimits(monotonic_clock=lambda: now[0]), invited()
+    with limits.analysis(session) as permit:
+        pipeline.analyze(pdf_bytes(["SQL Anforderungen " * 20]), pdf_bytes(["Erfahrung im Beruf " * 20]), "job")
+        permit.check()
+        assert not permit.expired
+    assert len(attempts) == len(config.ANALYSIS_API_STAGES)
+    assert sum(attempts.values()) == len(config.ANALYSIS_API_STAGES) * (1 + config.SDK_MAX_RETRIES) * (1 + config.RESPONSE_CORRECTION_RETRIES)
+    assert now[0] == limits.lease_seconds - config.ANALYSIS_BUFFER_SECONDS
+    assert waits and max(waits) == config.SDK_MAX_RETRY_WAIT_SECONDS
+    assert limits.lease_seconds > now[0]
+    assert session.analyses == limits.daily_count == 1

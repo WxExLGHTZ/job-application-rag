@@ -18,7 +18,7 @@ from typing import Any
 import streamlit as st
 
 from copilot import pipeline
-from copilot.access import AccessError, AnalysisLimits, SessionAccess, SESSION_LIMIT, DAILY_LIMIT
+from copilot.access import AccessError, AnalysisLimits, SessionAccess
 from copilot.index import get_embedding_model
 from copilot.ingest import DocumentTooLong, PdfExtractionError, PdfWithoutText
 from copilot.llm import (
@@ -86,11 +86,17 @@ def load_example_result() -> dict[str, Any]:
 def run_live_analysis(requirements_upload, profile_upload, mode, use_example, *, on_progress):
     """Alle Startwege durch dieselbe serverseitige Zulassung führen."""
     session = access_session()
-    with get_limits().analysis(session):
+    with get_limits().analysis(session) as permit:
         if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
             raise MissingApiKeyError("ANTHROPIC_API_KEY ist nicht gesetzt.")
         documents = read_documents(requirements_upload, profile_upload, use_example)
-        return pipeline.analyze(*documents, mode, on_progress=on_progress)
+        try:
+            result = pipeline.analyze(*documents, mode, on_progress=on_progress)
+        except Exception:
+            permit.check()
+            raise
+        permit.check()
+        return result
 
 
 def _escape(value: Any) -> str:
@@ -437,12 +443,6 @@ def main() -> None:
         return
 
     st.session_state.live_authorized = True
-    limits = get_limits()
-    blocked_reason = None
-    try:
-        limits.check_available(session)
-    except AccessError as error:
-        blocked_reason = str(error)
     try:
         load_model()
     except Exception:
@@ -491,14 +491,11 @@ def main() -> None:
 
         with st.container(key="step_analyze"):
             render_step(3, "Anforderungen prüfen")
-            if blocked_reason:
-                st.info(blocked_reason)
             ready = st.session_state.use_example or (
                 requirements_upload is not None and profile_upload is not None
             )
-            clicked = st.button("Analysieren", key="analyze_button", type="primary", disabled=not ready or blocked_reason is not None, width="stretch")
-            if clicked and ready and blocked_reason is None:
-                clear_result()
+            clicked = st.button("Analysieren", key="analyze_button", type="primary", disabled=not ready, width="stretch")
+            if clicked and ready:
                 with st.status("Analyse wird vorbereitet …", expanded=True) as status:
                     started = perf_counter()
                     try:
@@ -512,24 +509,23 @@ def main() -> None:
                                 requirements_upload, profile_upload, mode, st.session_state.use_example,
                                 on_progress=on_progress,
                             )
-                    except Exception as error:
+                    except AccessError as error:
                         logger.warning("error_type=%s", type(error).__name__)
                         status.update(label="Analyse nicht abgeschlossen", state="error", expanded=False)
-                        st.error(str(error) if isinstance(error, AccessError) else error_message(error))
-                        if blocked_reason is None:
-                            try:
-                                limits.check_available(session)
-                            except AccessError as limit_error:
-                                st.info(str(limit_error))
+                        st.info(str(error))
+                    except Exception as error:
+                        clear_result()
+                        logger.warning("error_type=%s", type(error).__name__)
+                        status.update(label="Analyse nicht abgeschlossen", state="error", expanded=False)
+                        st.error(error_message(error))
                     else:
+                        clear_result()
                         st.session_state.result = result
                         st.session_state.analysis_meta = {
                             "duration_seconds": perf_counter() - started,
                             "cost_usd": analysis_cost_usd(capture),
                         }
                         status.update(label="Analyse abgeschlossen", state="complete", expanded=False)
-                        if session.analyses >= SESSION_LIMIT or limits.daily_count >= DAILY_LIMIT:
-                            st.rerun()
             st.markdown('<p class="ac-input-hint">Jede Bewertung wird mit Belegen aus deinem Profil geprüft.</p>',
                         unsafe_allow_html=True)
 

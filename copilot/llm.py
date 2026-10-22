@@ -15,6 +15,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from copilot.schema import Assessment, AssessmentResponse, Evidence, ExtractedRequirement
 from copilot.access import AccessError, before_api_request, check_api_access
+from copilot.runtime_config import API_TIMEOUT_SECONDS, SDK_MAX_RETRIES, RESPONSE_CORRECTION_RETRIES
 
 
 DEFAULT_EXTRACT_MODEL = "claude-haiku-5-5"
@@ -25,7 +26,6 @@ THINKING_TYPE = "disabled"
 MAX_TOKENS = 16000
 REQUEST_TOKEN_LIMIT = 100_000
 TOKEN_SAFETY_MARGIN = 4096
-API_TIMEOUT_SECONDS = 60.0
 Mode = Literal["job", "tender"]
 
 # Unsupported constraints become descriptions in the API schema. The original
@@ -458,7 +458,7 @@ def _get_client() -> Anthropic:
         if not api_key.strip():
             raise MissingApiKeyError("ANTHROPIC_API_KEY ist leer.")
         _CLIENT = Anthropic(
-            api_key=api_key, timeout=API_TIMEOUT_SECONDS, max_retries=1,
+            api_key=api_key, timeout=API_TIMEOUT_SECONDS, max_retries=SDK_MAX_RETRIES,
             http_client=DefaultHttpxClient(event_hooks={"request": [before_api_request]}),
         )
 
@@ -543,7 +543,7 @@ def _send_and_parse_with_retry(
     usage: TokenUsage | None = None,
     output_schema: dict[str, Any] | None = None,
 ) -> Any:
-    for attempt in range(2):
+    for attempt in range(1 + RESPONSE_CORRECTION_RETRIES):
         try:
             response_text = _send_message(
                 system_prompt=system_prompt,
@@ -554,7 +554,7 @@ def _send_and_parse_with_retry(
             )
             return parse_response(response_text)
         except LlmResponseError as error:
-            if attempt == 1:
+            if attempt == RESPONSE_CORRECTION_RETRIES:
                 raise
             user_prompt += ("\n\nKorrekturhinweis zur vorherigen Antwort: " + str(error)
                             + "\nErzeuge die vollständige Antwort erneut im vorgegebenen JSON-Schema.")
