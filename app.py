@@ -551,7 +551,7 @@ def main() -> None:
                             if uploads[side] is not None:
                                 st.markdown(render_file_note(uploads[side].name), unsafe_allow_html=True)
             requirements_upload, profile_upload = uploads
-            st.button("Beispiel laden", key="example_button", type="secondary", on_click=select_example,
+            st.button("Beispiel laden", key="example_button", type="primary", width="stretch", on_click=select_example,
                       help="Startet eine Live-Analyse mit den fiktiven Beispiel-PDFs und zählt gegen die Analyse-Limits.")
             if any(st.session_state.use_example):
                 st.caption("Fiktive Beispieldateien. Jede Live-Analyse zählt gegen die Analyse-Limits.")

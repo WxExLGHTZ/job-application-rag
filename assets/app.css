@@ -55,7 +55,8 @@ button:focus-visible, a:focus-visible { outline: 3px solid #93b4ff !important; o
 .ac-file { margin: 0; display: flex; align-items: center; gap: var(--ac-space-2); color: #52627b; font-size: 11px; }
 .ac-file svg { width: 14px; height: 14px; flex: 0 0 auto; color: #5d79bc; }
 .ac-file span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.st-key-example_button button { font-size: 12px; min-height: 35px; background: #fff; border-color: #d7dde7; border-radius: 7px; color: #43516b; }
+.st-key-example_button button { font-size: 13px; font-weight: 600; min-height: 44px; background: var(--ac-blue); border-color: var(--ac-blue); border-radius: 7px; color: #fff; }
+.st-key-example_button button:hover { background: #193992; border-color: #193992; color: #fff; }
 .ac-example-label { font-size: 13px; font-weight: 550; margin-bottom: var(--ac-space-2); }
 .ac-example-document { display: flex; align-items: center; gap: 12px; min-height: 88px; border: 1px solid var(--ac-line); border-radius: 9px; padding: var(--ac-space-3); background: #fafbfe; }
 .ac-example-document > svg { width: 24px; height: 24px; color: #5d79bc; flex: 0 0 auto; }
