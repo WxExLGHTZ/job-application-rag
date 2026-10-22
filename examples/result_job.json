@@ -1,0 +1,142 @@
+{
+  "mode": "job",
+  "summary": {
+    "score": 68,
+    "muss_erfuellt": "6/7",
+    "fazit": "Die Person erfüllt die meisten Muss-Anforderungen (Studium, Python, Embeddings/semantische Suche, Git, Sprachen), hat bei Docker aber nur Grundkenntnisse. Von den optionalen Anforderungen ist nur Azure ansatzweise belegt."
+  },
+  "requirements": [
+    {
+      "id": "R1",
+      "status": "erfuellt",
+      "beleg": {
+        "zitat": "B.Sc. Informatik · Hochschule Musterstadt · 2020 bis 2024 · Note 1,8",
+        "seite": 1
+      },
+      "begruendung": "Ein abgeschlossener Bachelor in Informatik ist belegt.",
+      "text": "Abgeschlossenes Studium der Informatik oder eines vergleichbaren Fachs",
+      "typ": "muss"
+    },
+    {
+      "id": "R2",
+      "status": "erfuellt",
+      "beleg": {
+        "zitat": "Programmierung: Python (sehr gut), SQL (gut), JavaScript (Grundkenntnisse)",
+        "seite": 2
+      },
+      "begruendung": "Python-Kenntnisse sind ausdrücklich als sehr gut angegeben.",
+      "text": "Sehr gute Kenntnisse in Python",
+      "typ": "muss"
+    },
+    {
+      "id": "R3",
+      "status": "erfuellt",
+      "beleg": {
+        "zitat": "Aufbau einer semantischen Suche über interne Handbücher mit sentence-transformers und Cosine Similarity",
+        "seite": 1
+      },
+      "begruendung": "Praktische Erfahrung mit Embeddings und semantischer Suche ist im Beruf und in Projekten belegt.",
+      "text": "Praktische Erfahrung mit Embeddings, semantischer Suche oder RAG-Systemen",
+      "typ": "muss"
+    },
+    {
+      "id": "R4",
+      "status": "erfuellt",
+      "beleg": {
+        "zitat": "Versionsverwaltung aller Projekte mit Git und GitLab, Code-Reviews über Merge Requests",
+        "seite": 1
+      },
+      "begruendung": "Git wird durchgängig in Projekten samt Merge-Request-Reviews genutzt.",
+      "text": "Sicherer Umgang mit Git",
+      "typ": "muss"
+    },
+    {
+      "id": "R5",
+      "status": "teilweise",
+      "beleg": {
+        "zitat": "Werkzeuge: Git, GitLab, Docker (Grundkenntnisse aus dem Studium), Linux",
+        "seite": 2
+      },
+      "begruendung": "Docker ist nur auf Grundkenntnisniveau belegt, ein sicherer Umgang wird nicht nachgewiesen.",
+      "text": "Sicherer Umgang mit Docker",
+      "typ": "muss"
+    },
+    {
+      "id": "R6",
+      "status": "erfuellt",
+      "beleg": {
+        "zitat": "Sprachen: Deutsch (Muttersprache), Englisch (B2)",
+        "seite": 2
+      },
+      "begruendung": "Deutsch ist Muttersprache und übertrifft damit sehr gute Kenntnisse.",
+      "text": "Sehr gute Deutschkenntnisse",
+      "typ": "muss"
+    },
+    {
+      "id": "R7",
+      "status": "erfuellt",
+      "beleg": {
+        "zitat": "Sprachen: Deutsch (Muttersprache), Englisch (B2)",
+        "seite": 2
+      },
+      "begruendung": "Englisch B2 entspricht dem geforderten guten Niveau.",
+      "text": "Gute Englischkenntnisse",
+      "typ": "muss"
+    },
+    {
+      "id": "R8",
+      "status": "nicht_belegt",
+      "beleg": null,
+      "begruendung": "Kubernetes wird im Profil nicht erwähnt.",
+      "text": "Erfahrung mit Kubernetes",
+      "typ": "kann"
+    },
+    {
+      "id": "R9",
+      "status": "teilweise",
+      "beleg": {
+        "zitat": "Cloud: Microsoft Azure (Grundkurs AZ-900 besucht, keine Projekterfahrung)",
+        "seite": 2
+      },
+      "begruendung": "Azure-Kenntnisse beschränken sich auf einen Grundkurs ohne Projekterfahrung.",
+      "text": "Kenntnisse in Microsoft Azure oder Google Cloud Platform",
+      "typ": "kann"
+    },
+    {
+      "id": "R10",
+      "status": "nicht_belegt",
+      "beleg": null,
+      "begruendung": "LangChain, LangGraph oder ähnliche Frameworks werden nicht genannt.",
+      "text": "Erfahrung mit Frameworks wie LangChain oder LangGraph",
+      "typ": "kann"
+    },
+    {
+      "id": "R11",
+      "status": "nicht_belegt",
+      "beleg": null,
+      "begruendung": "TypeScript wird nicht erwähnt, nur JavaScript-Grundkenntnisse.",
+      "text": "Grundkenntnisse in TypeScript",
+      "typ": "kann"
+    },
+    {
+      "id": "R12",
+      "status": "nicht_belegt",
+      "beleg": null,
+      "begruendung": "React wird im Profil nicht erwähnt.",
+      "text": "Grundkenntnisse in React",
+      "typ": "kann"
+    },
+    {
+      "id": "R13",
+      "status": "nicht_belegt",
+      "beleg": null,
+      "begruendung": "MLOps-Werkzeuge wie MLflow sind nicht belegt.",
+      "text": "Erfahrung mit MLOps-Werkzeugen wie MLflow",
+      "typ": "kann"
+    }
+  ],
+  "usage": {
+    "input_tokens": 8874,
+    "output_tokens": 1781
+  }
+}

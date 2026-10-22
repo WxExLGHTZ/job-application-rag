@@ -10,10 +10,11 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterator, Literal
 
-from anthropic import Anthropic, APIConnectionError, APIStatusError, APITimeoutError, transform_schema
+from anthropic import Anthropic, APIConnectionError, APIStatusError, APITimeoutError, DefaultHttpxClient, transform_schema
 from pydantic import TypeAdapter, ValidationError
 
 from copilot.schema import Assessment, AssessmentResponse, Evidence, ExtractedRequirement
+from copilot.access import AccessError, before_api_request, check_api_access
 
 
 DEFAULT_EXTRACT_MODEL = "claude-haiku-5-5"
@@ -456,7 +457,10 @@ def _get_client() -> Anthropic:
 
         if not api_key.strip():
             raise MissingApiKeyError("ANTHROPIC_API_KEY ist leer.")
-        _CLIENT = Anthropic(api_key=api_key, timeout=API_TIMEOUT_SECONDS, max_retries=1)
+        _CLIENT = Anthropic(
+            api_key=api_key, timeout=API_TIMEOUT_SECONDS, max_retries=1,
+            http_client=DefaultHttpxClient(event_hooks={"request": [before_api_request]}),
+        )
 
     return _CLIENT
 
@@ -474,6 +478,7 @@ def _send_message(
     output_config = {"effort": MODEL_EFFORT}
     if output_schema is not None:
         output_config["format"] = {"type": "json_schema", "schema": output_schema}
+    check_api_access()
     try:
         response = _get_client().messages.create(
             model=model,
@@ -491,8 +496,13 @@ def _send_message(
         raise
     except APITimeoutError:
         raise LlmApiError("timeout") from None
-    except APIConnectionError:
+    except APIConnectionError as error:
+        # Das SDK verpackt auch abgelehnte HTTP-Hooks als Verbindungsfehler.
+        if isinstance(error.__cause__, AccessError):
+            raise error.__cause__ from None
         raise LlmApiError("connection") from None
+    except AccessError:
+        raise
     except APIStatusError as error:
         raise LlmApiError(_api_error_reason(error)) from None
     except Exception as error:

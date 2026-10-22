@@ -6,6 +6,8 @@ import base64
 import html
 import json
 import math
+import logging
+import os
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
@@ -16,6 +18,7 @@ from typing import Any
 import streamlit as st
 
 from copilot import pipeline
+from copilot.access import AccessError, AnalysisLimits, SessionAccess, SESSION_LIMIT, DAILY_LIMIT
 from copilot.index import get_embedding_model
 from copilot.ingest import DocumentTooLong, PdfExtractionError, PdfWithoutText
 from copilot.llm import (
@@ -23,6 +26,7 @@ from copilot.llm import (
     OutputTokenLimit, RequestTooLarge, UsageCapture, capture_token_usage,
 )
 from copilot.pricing import calculate_cost_usd
+from copilot.schema import AnalysisResult
 
 
 TITLE = "Anforderungs-Check"
@@ -34,6 +38,8 @@ STAGES = {
     "evidence": "Belege suchen", "assessment": "Bewerten",
 }
 STATUS_LABELS = {"erfuellt": "erfüllt", "teilweise": "teilweise", "nicht_belegt": "nicht belegt"}
+INVITATION_NOTICE = "Die Live-Analyse ist auf eingeladene Besucher begrenzt. Unten siehst du ein vollständiges Beispielergebnis."
+logger = logging.getLogger(__name__)
 
 
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
@@ -56,6 +62,35 @@ def app_styles() -> str:
 def load_model():
     """Nur das CPU-Modell wird sitzungsübergreifend wiederverwendet."""
     return get_embedding_model()
+
+
+@st.cache_resource
+def get_limits() -> AnalysisLimits:
+    """Flüchtige, prozessweite Zähler; ein Serverneustart setzt sie zurück."""
+    return AnalysisLimits()
+
+
+def access_session() -> SessionAccess:
+    session = st.session_state.setdefault("access_session", SessionAccess())
+    codes = st.query_params.get_all("code")
+    # Mehrdeutige Links mit mehreren Codes werden ebenfalls abgelehnt.
+    session.refresh(codes[0] if len(codes) == 1 else "" if codes else None)
+    return session
+
+
+def load_example_result() -> dict[str, Any]:
+    text = (EXAMPLES_DIR / "result_job.json").read_text(encoding="utf-8-sig")
+    return AnalysisResult.model_validate_json(text).model_dump()
+
+
+def run_live_analysis(requirements_upload, profile_upload, mode, use_example, *, on_progress):
+    """Alle Startwege durch dieselbe serverseitige Zulassung führen."""
+    session = access_session()
+    with get_limits().analysis(session):
+        if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
+            raise MissingApiKeyError("ANTHROPIC_API_KEY ist nicht gesetzt.")
+        documents = read_documents(requirements_upload, profile_upload, use_example)
+        return pipeline.analyze(*documents, mode, on_progress=on_progress)
 
 
 def _escape(value: Any) -> str:
@@ -329,6 +364,38 @@ def read_documents(requirements_upload, profile_upload, use_example: bool) -> tu
 
 
 
+def render_result_panel(result: dict[str, Any], metadata=None, *, example: bool = False) -> None:
+    heading = "Beispielergebnis" if example else "Deine Auswertung"
+    st.markdown(f'<div class="ac-section-title"><h2>{_escape(heading)}</h2>'
+                f'<span>{_escape(len(result["requirements"]))} Anforderungen geprüft</span></div>',
+                unsafe_allow_html=True)
+    st.markdown(render_dashboard_html(result, metadata), unsafe_allow_html=True)
+    st.markdown('<div class="ac-section-title"><h2>Anforderungen im Detail</h2>'
+                '<span>Nach Priorität sortiert</span></div>', unsafe_allow_html=True)
+    selected_filter = st.segmented_control(
+        "Anforderungen filtern", FILTERS, default="Alle", required=True, key="result_filter",
+        label_visibility="collapsed", width=264,
+    )
+    st.markdown(render_requirements_html(result, selected_filter), unsafe_allow_html=True)
+    with st.container(key="export_actions", horizontal=True, gap="small"):
+        st.download_button(
+            "Markdown", data=result_markdown(result), file_name="anforderungs-check.md",
+            mime="text/markdown; charset=utf-8", on_click="ignore",
+        )
+        st.download_button(
+            "JSON", data=json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False),
+            file_name="anforderungs-check.json", mime="application/json", on_click="ignore",
+        )
+
+
+def render_footer() -> None:
+    st.markdown(
+        '<div class="ac-footer"><span>Gebaut von WxExLGHTZ</span>'
+        f'<a href="{REPO_URL}" target="_blank" rel="noopener noreferrer">Projekt auf GitHub</a></div>',
+        unsafe_allow_html=True,
+    )
+
+
 def main() -> None:
     st.set_page_config(page_title=TITLE, layout="wide", initial_sidebar_state="collapsed")
     st.markdown(app_styles(), unsafe_allow_html=True)
@@ -347,6 +414,35 @@ def main() -> None:
 
     for key, value in (("upload_generation", 0), ("use_example", False), ("example_notice", False)):
         st.session_state.setdefault(key, value)
+    session = access_session()
+    if not session.authorized:
+        if st.session_state.pop("live_authorized", False) or st.session_state.get("result") is not None:
+            clear_result()
+        st.session_state.use_example = False
+        st.session_state.example_notice = False
+        for key in list(st.session_state):
+            if key.startswith(("requirements_", "profile_")):
+                st.session_state.pop(key, None)
+        with st.container(key="input_card"):
+            st.info(INVITATION_NOTICE)
+            st.button("Analysieren", key="analyze_button", type="primary", disabled=True, width="stretch")
+        try:
+            example_result = load_example_result()
+        except Exception as error:
+            logger.warning("error_type=%s", type(error).__name__)
+            st.error("Das Beispielergebnis konnte nicht geladen werden. Bitte versuche es später erneut.")
+        else:
+            render_result_panel(example_result, example=True)
+        render_footer()
+        return
+
+    st.session_state.live_authorized = True
+    limits = get_limits()
+    blocked_reason = None
+    try:
+        limits.check_available(session)
+    except AccessError as error:
+        blocked_reason = str(error)
     try:
         load_model()
     except Exception:
@@ -395,26 +491,36 @@ def main() -> None:
 
         with st.container(key="step_analyze"):
             render_step(3, "Anforderungen prüfen")
+            if blocked_reason:
+                st.info(blocked_reason)
             ready = st.session_state.use_example or (
                 requirements_upload is not None and profile_upload is not None
             )
-            if st.button("Analysieren", key="analyze_button", type="primary", disabled=not ready, width="stretch"):
+            clicked = st.button("Analysieren", key="analyze_button", type="primary", disabled=not ready or blocked_reason is not None, width="stretch")
+            if clicked and ready and blocked_reason is None:
                 clear_result()
                 with st.status("Analyse wird vorbereitet …", expanded=True) as status:
                     started = perf_counter()
                     try:
-                        documents = read_documents(requirements_upload, profile_upload, st.session_state.use_example)
-
                         def on_progress(stage: pipeline.ProgressStage) -> None:
                             label = STAGES[stage]
                             status.update(label=f"{label} …")
                             status.write(label)
 
                         with capture_token_usage() as capture:
-                            result = pipeline.analyze(*documents, mode, on_progress=on_progress)
+                            result = run_live_analysis(
+                                requirements_upload, profile_upload, mode, st.session_state.use_example,
+                                on_progress=on_progress,
+                            )
                     except Exception as error:
+                        logger.warning("error_type=%s", type(error).__name__)
                         status.update(label="Analyse nicht abgeschlossen", state="error", expanded=False)
-                        st.error(error_message(error))
+                        st.error(str(error) if isinstance(error, AccessError) else error_message(error))
+                        if blocked_reason is None:
+                            try:
+                                limits.check_available(session)
+                            except AccessError as limit_error:
+                                st.info(str(limit_error))
                     else:
                         st.session_state.result = result
                         st.session_state.analysis_meta = {
@@ -422,31 +528,13 @@ def main() -> None:
                             "cost_usd": analysis_cost_usd(capture),
                         }
                         status.update(label="Analyse abgeschlossen", state="complete", expanded=False)
+                        if session.analyses >= SESSION_LIMIT or limits.daily_count >= DAILY_LIMIT:
+                            st.rerun()
             st.markdown('<p class="ac-input-hint">Jede Bewertung wird mit Belegen aus deinem Profil geprüft.</p>',
                         unsafe_allow_html=True)
 
     if st.session_state.get("result") is not None:
-        result = st.session_state.result
-        st.markdown('<div class="ac-section-title"><h2>Deine Auswertung</h2>'
-                    f'<span>{_escape(len(result["requirements"]))} Anforderungen geprüft</span></div>',
-                    unsafe_allow_html=True)
-        st.markdown(render_dashboard_html(result, st.session_state.get("analysis_meta")), unsafe_allow_html=True)
-        st.markdown('<div class="ac-section-title"><h2>Anforderungen im Detail</h2>'
-                    '<span>Nach Priorität sortiert</span></div>', unsafe_allow_html=True)
-        selected_filter = st.segmented_control(
-            "Anforderungen filtern", FILTERS, default="Alle", required=True, key="result_filter",
-            label_visibility="collapsed", width=264,
-        )
-        st.markdown(render_requirements_html(result, selected_filter), unsafe_allow_html=True)
-        with st.container(key="export_actions", horizontal=True, gap="small"):
-            st.download_button(
-                "Markdown", data=result_markdown(result), file_name="anforderungs-check.md",
-                mime="text/markdown; charset=utf-8", on_click="ignore",
-            )
-            st.download_button(
-                "JSON", data=json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False),
-                file_name="anforderungs-check.json", mime="application/json", on_click="ignore",
-            )
+        render_result_panel(st.session_state.result, st.session_state.get("analysis_meta"))
     else:
         st.markdown(
             '<section class="ac-empty"><h2>Von Anforderungen zu einer fundierten Entscheidung.</h2>'
@@ -457,11 +545,7 @@ def main() -> None:
             '<span><i class="ac-dot" style="color:#aeb8c7" aria-hidden="true"></i>Nicht belegt · Nachweis fehlt</span>'
             '</div></section>', unsafe_allow_html=True,
         )
-    st.markdown(
-        '<div class="ac-footer"><span>Gebaut von WxExLGHTZ</span>'
-        f'<a href="{REPO_URL}" target="_blank" rel="noopener noreferrer">Projekt auf GitHub</a></div>',
-        unsafe_allow_html=True,
-    )
+    render_footer()
 
 
 if __name__ == "__main__":

@@ -143,10 +143,13 @@ def test_sdk_retry_and_response_retry_are_both_enabled(monkeypatch):
     def factory(**kwargs):
         nonlocal client
         settings.update(kwargs)
-        client = Anthropic(**kwargs, http_client=httpx.Client(transport=httpx.MockTransport(transport)))
+        client = Anthropic(**kwargs)
         return client
     monkeypatch.setattr(llm, "_CLIENT", None)
     monkeypatch.setattr(llm, "Anthropic", factory)
+    monkeypatch.setattr(llm, "DefaultHttpxClient", lambda **kwargs: httpx.Client(
+        transport=httpx.MockTransport(transport), **kwargs,
+    ))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "synthetic-key")
     usage = llm.TokenUsage()
     try:

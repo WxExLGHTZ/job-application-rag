@@ -25,6 +25,7 @@ MIN_TEXT_PER_PAGE = 30
 _pdf_logger = logging.getLogger("pypdf")
 _pdf_logger.addHandler(logging.NullHandler())
 _pdf_logger.propagate = False
+_pdf_logger.setLevel(logging.CRITICAL + 1)
 
 
 class PdfExtractionError(ValueError):

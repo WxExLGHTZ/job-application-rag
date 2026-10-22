@@ -12,6 +12,7 @@ from streamlit.testing.v1 import AppTest
 
 import app
 from copilot import llm
+from copilot.access import before_api_request
 from copilot.ingest import DocumentTooLong, PdfExtractionError, PdfWithoutText
 
 
@@ -31,7 +32,23 @@ def result():
 
 
 @pytest.fixture
-def ui(monkeypatch, result):
+def live_access(monkeypatch):
+    monkeypatch.setenv("ACCESS_CODE", "test-invitation")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-api-key")
+    clear_limits = app.get_limits.clear
+    clear_limits()
+    yield
+    clear_limits()
+
+
+def live_app():
+    at = AppTest.from_string("import app\napp.main()")
+    at.query_params["code"] = "test-invitation"
+    return at.run()
+
+
+@pytest.fixture
+def ui(monkeypatch, result, live_access):
     monkeypatch.setattr(app, "load_model", lambda: object())
 
     def analyze(requirements, profile, mode, *, on_progress):
@@ -41,7 +58,7 @@ def ui(monkeypatch, result):
 
     mocked = Mock(side_effect=analyze)
     monkeypatch.setattr(app.pipeline, "analyze", mocked)
-    return AppTest.from_string("import app\napp.main()").run(), mocked
+    return live_app(), mocked
 
 
 def test_initial_view_and_mode_dependent_labels(ui):
@@ -95,7 +112,7 @@ def test_results_do_not_leak_between_sessions(ui):
     at, _ = ui
     at.button[0].click().run()
     at.button[1].click().run()
-    other = AppTest.from_string("import app\napp.main()").run()
+    other = live_app()
     assert "result" in at.session_state
     assert "result" not in other.session_state
     assert "analysis_meta" not in other.session_state
@@ -136,9 +153,9 @@ def test_errors_are_friendly_and_clear_old_result(ui, caplog, error, expected):
     assert not at.get("download_button")
 
 
-def test_model_load_failure_does_not_show_exception(monkeypatch):
+def test_model_load_failure_does_not_show_exception(monkeypatch, live_access):
     monkeypatch.setattr(app, "load_model", Mock(side_effect=RuntimeError("PRIVATE")))
-    at = AppTest.from_string("import app\napp.main()").run()
+    at = live_app()
     assert not at.exception
     assert "Modell" in at.error[0].value
     assert "PRIVATE" not in at.error[0].value
@@ -360,3 +377,172 @@ def test_filename_and_requirement_id_are_escaped(result):
     assert html.escape(attack, quote=True) in app.render_requirements_html(result)
     assert attack not in app.render_file_note(attack)
     assert app.render_file_note(attack).count(html.escape(attack, quote=True)) == 2
+
+
+@pytest.mark.parametrize("code", [None, "wrong", ""])
+def test_public_view_has_demo_but_no_upload_model_or_analysis(monkeypatch, live_access, code, caplog):
+    model, analyze = Mock(), Mock()
+    monkeypatch.setattr(app, "load_model", model)
+    monkeypatch.setattr(app.pipeline, "analyze", analyze)
+    at = AppTest.from_string("import app\napp.main()")
+    if code is not None:
+        at.query_params["code"] = code
+    at.run()
+    assert not at.exception
+    assert not at.error
+    assert at.info[0].value == app.INVITATION_NOTICE
+    assert not at.get("file_uploader")
+    assert at.button[0].disabled
+    assert len(at.get("download_button")) == 2
+    assert any("Beispielergebnis" in item.value for item in at.markdown)
+    assert any("68" in item.value and 'class="ac-metrics"' in item.value for item in at.markdown)
+    at.button[0].click().run()  # Auch ein simulierter Klick darf nichts starten.
+    at.get("button_group")[0].set_value("Lücken").run()
+    assert not at.exception
+    assert at.get("button_group")[0].value == "Lücken"
+    analyze.assert_not_called()
+    model.assert_not_called()
+    assert "test-invitation" not in caplog.text
+    assert "test-api-key" not in caplog.text
+    assert "result" not in at.session_state
+    assert app.get_limits().daily_count == 0
+
+
+def test_valid_link_cannot_unlock_without_environment_code(monkeypatch, live_access):
+    monkeypatch.delenv("ACCESS_CODE")
+    model = Mock()
+    monkeypatch.setattr(app, "load_model", model)
+    at = live_app()
+    assert not at.exception
+    assert at.button[0].disabled
+    assert not at.get("file_uploader")
+    model.assert_not_called()
+
+
+def test_invitation_survives_rerun_but_revocation_clears_private_result(ui, monkeypatch):
+    at, analyze = ui
+    at.query_params.clear()
+    at.run()
+    assert len(at.get("file_uploader")) == 2
+    at.button[0].click().run()
+    at.button[1].click().run()
+    assert "result" in at.session_state
+    monkeypatch.delenv("ACCESS_CODE")
+    at.run()
+    assert not at.exception
+    assert "result" not in at.session_state
+    assert "analysis_meta" not in at.session_state
+    assert not at.get("file_uploader")
+    assert any("Beispielergebnis" in item.value for item in at.markdown)
+    analyze.assert_called_once()
+
+
+def test_five_live_analyses_then_disabled_with_exact_limit_message(ui, result):
+    at, analyze = ui
+    def started(*args, **kwargs):
+        before_api_request(None)
+        return copy.deepcopy(result)
+    analyze.side_effect = started
+    at.button[0].click().run()
+    for _ in range(5):
+        at.button[1].click().run()
+        assert not at.exception
+    assert at.session_state["access_session"].analyses == 5
+    assert app.get_limits().daily_count == 5
+    assert at.button[1].disabled
+    assert any(item.value == "Das Analyse-Limit für diese Sitzung ist erreicht. Danke fürs Ausprobieren!" for item in at.info)
+    at.button[1].click().run()
+    assert analyze.call_count == 5
+    assert at.session_state["result"] == result
+
+
+def test_bad_pdf_and_missing_api_key_do_not_consume_quota(monkeypatch, live_access, caplog):
+    from copilot.access import AnalysisLimits, SessionAccess
+    session, limits = SessionAccess(), AnalysisLimits()
+    session.refresh("test-invitation")
+    monkeypatch.setattr(app, "access_session", lambda: session)
+    monkeypatch.setattr(app, "get_limits", lambda: limits)
+    for _ in range(3):
+        with pytest.raises(PdfExtractionError):
+            app.run_live_analysis(BytesIO(b"bad PDF"), BytesIO(b"bad PDF"), "job", False, on_progress=lambda _: None)
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    with pytest.raises(llm.MissingApiKeyError):
+        app.run_live_analysis(None, None, "job", True, on_progress=lambda _: None)
+    assert session.analyses == limits.daily_count == 0
+    assert "bad P" not in caplog.text
+
+
+def test_server_gate_blocks_direct_start_without_authorization(monkeypatch, live_access):
+    from copilot.access import AccessDenied, SessionAccess
+    monkeypatch.setattr(app, "access_session", lambda: SessionAccess())
+    reader, analyze = Mock(), Mock()
+    monkeypatch.setattr(app, "read_documents", reader)
+    monkeypatch.setattr(app.pipeline, "analyze", analyze)
+    with pytest.raises(AccessDenied):
+        app.run_live_analysis(None, None, "job", True, on_progress=lambda _: None)
+    reader.assert_not_called()
+    analyze.assert_not_called()
+
+
+def test_example_schema_error_is_friendly_and_does_not_disclose_contents(monkeypatch, live_access, caplog):
+    def invalid_example():
+        return app.AnalysisResult.model_validate({"PRIVATE_FIELD": "PRIVATE_DOCUMENT"})
+    monkeypatch.setattr(app, "load_example_result", invalid_example)
+    at = AppTest.from_string("import app\napp.main()").run()
+    assert not at.exception
+    assert "Beispielergebnis" in at.error[0].value
+    assert "PRIVATE" not in caplog.text
+    assert "ValidationError" in caplog.text
+
+
+def test_shared_limit_manager_is_cached():
+    assert app.get_limits() is app.get_limits()
+
+
+def test_api_failures_after_start_consume_quota(ui, caplog):
+    at, analyze = ui
+    def failed(*args, **kwargs):
+        before_api_request(None)
+        raise llm.LlmApiError("timeout")
+    analyze.side_effect = failed
+    at.button[0].click().run()
+    for _ in range(5):
+        at.button[1].click().run()
+        assert not at.exception
+        assert "zu lange" in at.error[0].value
+    assert at.session_state["access_session"].analyses == 5
+    assert app.get_limits().daily_count == 5
+    assert any("Analyse-Limit für diese Sitzung" in item.value for item in at.info)
+    at.run()
+    assert at.button[1].disabled
+    assert "test-invitation" not in caplog.text
+    assert "test-api-key" not in caplog.text
+
+
+def test_global_daily_limit_blocks_another_session(ui):
+    from copilot.access import SessionAccess
+    at, analyze = ui
+    limits = app.get_limits()
+    for _ in range(50):
+        session = SessionAccess()
+        session.refresh("test-invitation")
+        with limits.analysis(session):
+            before_api_request(None)
+    at.button[0].click().run()
+    assert at.button[1].disabled
+    assert any("tägliche Analyse-Limit" in item.value for item in at.info)
+    at.button[1].click().run()
+    analyze.assert_not_called()
+    assert at.session_state["access_session"].analyses == 0
+
+
+def test_ambiguous_invitation_link_is_locked(monkeypatch, live_access):
+    model = Mock()
+    monkeypatch.setattr(app, "load_model", model)
+    at = AppTest.from_string("import app\napp.main()")
+    at.query_params["code"] = ["test-invitation", "wrong"]
+    at.run()
+    assert not at.exception
+    assert not at.get("file_uploader")
+    assert at.button[0].disabled
+    model.assert_not_called()
