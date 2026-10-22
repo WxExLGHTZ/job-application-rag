@@ -87,6 +87,69 @@ def test_initial_view_and_mode_dependent_labels(ui):
     analyze.assert_not_called()
 
 
+def test_example_toggle_has_one_primary_and_resets_inputs_without_analysis(ui):
+    at, analyze = ui
+    assert at.button(key="example_button").label == "Beispiel verwenden"
+    assert [button.key for button in at.button if button.proto.type == "primary"] == ["analyze_button"]
+    at.button(key="example_button").click().run()
+    assert not at.exception
+    assert at.button(key="example_button").label == "Eigene Dateien verwenden"
+    assert at.button(key="analyze_button").label == "Beispiel analysieren"
+    assert [button.key for button in at.button if button.proto.type == "primary"] == ["analyze_button"]
+    assert any("noch 5 von 5" in item.value for item in at.markdown)
+    at.button(key="example_button").click().run()
+    assert len(at.get("file_uploader")) == 2
+    assert at.session_state["use_example"] == (False, False)
+    assert at.button(key="analyze_button").label == "Analysieren"
+    assert at.button(key="analyze_button").disabled
+    assert not at.get("download_button")
+    analyze.assert_not_called()
+
+
+def test_selected_upload_cards_survive_rerun_and_remove_only_their_document(ui, pdf_bytes):
+    at, analyze = ui
+    first = app.SelectedPdf("anforderungen.pdf", pdf_bytes(["Anforderungen", "Seite zwei"]))
+    second = app.SelectedPdf("profil.pdf", pdf_bytes(["Profil"]))
+    at.session_state["selected_uploads"] = (first, second)
+    at.run()
+    assert not at.exception
+    assert not at.get("file_uploader")
+    assert [item.proto.label for item in at.get("download_button")] == ["Ansehen", "Ansehen"]
+    assert any("2 Seiten" in item.value for item in at.markdown)
+    assert any("1 Seite" in item.value for item in at.markdown)
+    assert not at.button(key="analyze_button").disabled
+    at.run()
+    assert at.session_state["selected_uploads"] == (first, second)
+    at.button(key="own_document_0").click().run()
+    assert not at.exception
+    assert at.session_state["selected_uploads"] == (None, second)
+    assert len(at.get("file_uploader")) == 1
+    assert at.button(key="analyze_button").disabled
+    at.get("button_group")[0].set_value("tender").run()
+    assert at.session_state["selected_uploads"] == (None, None)
+    analyze.assert_not_called()
+
+
+def test_upload_callback_keeps_bytes_only_in_session(monkeypatch, pdf_bytes):
+    class State(dict):
+        __getattr__ = dict.__getitem__
+        __setattr__ = dict.__setitem__
+    data = pdf_bytes(["Profil"])
+    upload = BytesIO(data)
+    upload.name = "profil.pdf"
+    state = State(selected_uploads=(None, None), profile_0=upload,
+                  result={"old": True}, analysis_meta={"old": True})
+    monkeypatch.setattr(app.st, "session_state", state)
+    app.change_upload(1, "profile_0")
+    assert state["selected_uploads"] == (None, app.SelectedPdf("profil.pdf", data))
+    assert "result" not in state and "analysis_meta" not in state
+
+
+def test_page_metadata_does_not_change_pdf_validation(pdf_bytes):
+    assert app.pdf_page_count(pdf_bytes(["Seite eins", "Seite zwei"])) == 2
+    assert app.pdf_page_count(b"invalid PDF") is None
+
+
 def test_open_session_from_previous_version_keeps_example_inputs_without_starting(ui):
     at, analyze = ui
     at.session_state["use_example"] = True
@@ -115,7 +178,7 @@ def test_example_analysis_progress_download_and_rerun(ui, result):
     assert at.session_state["analysis_meta"]["duration_seconds"] >= 0
     assert at.status[0].state == "complete"
     assert [item.value for item in at.status[0].markdown] == list(app.STAGES.values())
-    assert [item.proto.label for item in at.get("download_button")] == ["Stellenanzeige ansehen", "Lebenslauf ansehen", "Als Markdown exportieren", "Als JSON exportieren"]
+    assert [item.proto.label for item in at.get("download_button")] == ["Ansehen", "Ansehen", "Als Markdown exportieren", "Als JSON exportieren"]
     assert any("Muss-Kriterien" in item.value and "1/1" in item.value for item in at.markdown)
     at.run()
     analyze.assert_called_once()

@@ -9,17 +9,20 @@ import json
 import math
 import logging
 import os
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
+from io import BytesIO
 import re
 from time import perf_counter
 from typing import Any
 
 import streamlit as st
+from pypdf import PdfReader
 
 from copilot import pipeline
-from copilot.access import AccessError, AnalysisLimits, SessionAccess
+from copilot.access import AccessError, AnalysisLimits, SessionAccess, SESSION_LIMIT
 from copilot.index import get_embedding_model
 from copilot.ingest import DocumentTooLong, PdfExtractionError, PdfWithoutText
 from copilot.llm import (
@@ -366,15 +369,32 @@ def clear_result() -> None:
     st.session_state.pop("result_filter", None)
 
 
+@dataclass(frozen=True)
+class SelectedPdf:
+    """Ein hochgeladenes PDF bleibt ausschließlich in der aktuellen Sitzung."""
+
+    name: str
+    data: bytes
+
+    def getvalue(self) -> bytes:
+        return self.data
+
+
 def change_mode() -> None:
     clear_result()
     st.session_state.use_example = (False, False)
+    st.session_state.selected_uploads = (None, None)
     st.session_state.pop("start_example_analysis", None)
     st.session_state.upload_generation += 1
 
 
-def change_upload() -> None:
+def change_upload(side: int | None = None, widget_key: str | None = None) -> None:
     clear_result()
+    if side is not None and widget_key is not None:
+        upload = st.session_state.get(widget_key)
+        documents = list(st.session_state.selected_uploads)
+        documents[side] = SelectedPdf(upload.name, upload.getvalue()) if upload is not None else None
+        st.session_state.selected_uploads = tuple(documents)
 
 
 def use_own_document(side: int) -> None:
@@ -382,12 +402,17 @@ def use_own_document(side: int) -> None:
     sources = list(st.session_state.use_example)
     sources[side] = False
     st.session_state.use_example = tuple(sources)
+    documents = list(st.session_state.selected_uploads)
+    documents[side] = None
+    st.session_state.selected_uploads = tuple(documents)
+    st.session_state.upload_generation += 1
     st.session_state.pop("start_example_analysis", None)
 
 
 def select_example() -> None:
     clear_result()
     st.session_state.use_example = (True, True)
+    st.session_state.selected_uploads = (None, None)
     # Neue Widget-Keys leeren alte Uploads vor dem nächsten Rendern.
     st.session_state.upload_generation += 1
 
@@ -411,16 +436,42 @@ def render_pdf_download(mode: str, side: int, *, key: str) -> None:
                        type="tertiary", on_click="ignore")
 
 
-def render_example_document(mode: str, side: int) -> None:
-    path = example_paths(mode)[side]
-    st.markdown(
-        f'<div class="ac-example-label">{_escape(UPLOAD_LABELS[mode][side])} (PDF)</div>'
-        f'<div class="ac-example-document">{FILE_SVG}<div><strong>{_escape(path.name)}</strong>'
-        '<span class="ac-example-badge">Beispiel</span></div></div>', unsafe_allow_html=True,
-    )
-    render_pdf_download(mode, side, key=f"input_pdf_{side}")
-    st.button("Eigene Datei verwenden", key=f"own_document_{side}", type="tertiary",
-              on_click=use_own_document, args=(side,))
+def pdf_page_count(data: bytes) -> int | None:
+    """Nur Metadaten lesen; die bestehende PDF-Prüfung bleibt beim Analysestart."""
+    try:
+        with BytesIO(data) as stream:
+            return len(PdfReader(stream).pages) or None
+    except Exception:
+        return None
+
+
+def render_document_card(mode: str, side: int, upload: SelectedPdf | None = None) -> None:
+    example = upload is None
+    try:
+        name = example_paths(mode)[side].name if example else upload.name
+        data = example_paths(mode)[side].read_bytes() if example else upload.getvalue()
+    except OSError:
+        st.caption("Beispiel-PDF momentan nicht verfügbar.")
+        st.button("Datei entfernen", key=f"own_document_{side}", on_click=use_own_document, args=(side,))
+        return
+    count = pdf_page_count(data)
+    pages = f"{count} {'Seite' if count == 1 else 'Seiten'}" if count else "PDF"
+    metadata = f'{_escape(pages)} · <span class="ac-example-badge">Beispiel</span>' if example else _escape(pages)
+    st.markdown(f'<div class="ac-example-label">{_escape(UPLOAD_LABELS[mode][side])} (PDF)</div>', unsafe_allow_html=True)
+    with st.container(key=f"file_card_{side}"):
+        icon, document, view, remove = st.columns([1, 6, 3, 1], gap="small", vertical_alignment="center")
+        with icon:
+            st.markdown(f'<div class="ac-document-icon">{FILE_SVG}</div>', unsafe_allow_html=True)
+        with document:
+            st.markdown(f'<div class="ac-document-info"><strong title="{_escape(name)}">{_escape(name)}</strong>'
+                        f'<span>{metadata}</span></div>', unsafe_allow_html=True)
+        with view:
+            st.download_button("Ansehen", data=data, file_name=name, mime="application/pdf",
+                               key=f"input_pdf_{side}", type="tertiary", icon=":material/visibility:",
+                               help=f"{UPLOAD_LABELS[mode][side]} als PDF herunterladen", on_click="ignore")
+        with remove:
+            st.button("Entfernen", key=f"own_document_{side}", type="tertiary", icon=":material/close:",
+                      help=f"{UPLOAD_LABELS[mode][side]} entfernen", on_click=use_own_document, args=(side,))
 
 
 def change_public_example() -> None:
@@ -476,7 +527,7 @@ def main() -> None:
         '</span></div></section>', unsafe_allow_html=True,
     )
 
-    for key, value in (("upload_generation", 0), ("use_example", (False, False))):
+    for key, value in (("upload_generation", 0), ("use_example", (False, False)), ("selected_uploads", (None, None))):
         st.session_state.setdefault(key, value)
     # Bereits offene Sitzungen der vorherigen Version übernehmen.
     if isinstance(st.session_state.use_example, bool):
@@ -486,6 +537,7 @@ def main() -> None:
         if st.session_state.pop("live_authorized", False) or st.session_state.get("result") is not None:
             clear_result()
         st.session_state.use_example = (False, False)
+        st.session_state.selected_uploads = (None, None)
         st.session_state.pop("start_example_analysis", None)
         for key in list(st.session_state):
             if key.startswith(("requirements_", "profile_")):
@@ -532,27 +584,30 @@ def main() -> None:
         labels = UPLOAD_LABELS[mode]
         generation = st.session_state.upload_generation
         with st.container(key="step_documents"):
-            render_step(2, "Dokumente hinzufügen")
-            uploads = [None, None]
+            example_active = any(st.session_state.use_example)
+            with st.container(key="document_heading", horizontal=True, horizontal_alignment="distribute", vertical_alignment="center", gap="small"):
+                render_step(2, "Dokumente hinzufügen")
+                st.button("Eigene Dateien verwenden" if example_active else "Beispiel verwenden",
+                          key="example_button", type="tertiary",
+                          icon=":material/upload_file:" if example_active else ":material/description:",
+                          on_click=change_mode if example_active else select_example)
+            uploads = list(st.session_state.selected_uploads)
             with st.container(key="document_uploads"):
                 left, right = st.columns(2, gap="medium")
                 for side, column in enumerate((left, right)):
                     with column:
                         if st.session_state.use_example[side]:
-                            render_example_document(mode, side)
+                            render_document_card(mode, side)
+                        elif uploads[side] is not None:
+                            render_document_card(mode, side, uploads[side])
                         else:
                             prefix = "requirements" if side == 0 else "profile"
+                            widget_key = f"{prefix}_{generation}"
                             uploads[side] = st.file_uploader(
-                                f"{labels[side]} (PDF)", type=["pdf"], key=f"{prefix}_{generation}",
-                                on_change=change_upload, help="Eine PDF-Datei, maximal 5 MB.",
+                                f"{labels[side]} (PDF)", type=["pdf"], key=widget_key,
+                                on_change=change_upload, args=(side, widget_key), help="Eine PDF-Datei, maximal 5 MB.",
                             )
-                            if uploads[side] is not None:
-                                st.markdown(render_file_note(uploads[side].name), unsafe_allow_html=True)
             requirements_upload, profile_upload = uploads
-            st.button("Beispiel laden", key="example_button", type="primary", width="stretch", on_click=select_example,
-                      help="Wählt die fiktiven Beispiel-PDFs aus. Die Analyse startet erst mit „Analysieren”.")
-            if any(st.session_state.use_example):
-                st.caption("Fiktive Beispieldateien ausgewählt. Starte die Auswertung mit „Analysieren”. Jede Live-Analyse zählt gegen die Analyse-Limits.")
 
         with st.container(key="step_analyze"):
             render_step(3, "Anforderungen prüfen")
@@ -560,7 +615,8 @@ def main() -> None:
                         for selected, upload in zip(st.session_state.use_example, uploads))
             # Startwünsche einer bereits offenen Sitzung der alten Version verwerfen.
             st.session_state.pop("start_example_analysis", None)
-            clicked = st.button("Analysieren", key="analyze_button", type="primary", disabled=not ready, width="stretch")
+            clicked = st.button("Beispiel analysieren" if all(st.session_state.use_example) else "Analysieren",
+                                key="analyze_button", type="primary", disabled=not ready, width="stretch")
             if clicked and ready:
                 with st.status("Analyse wird vorbereitet …", expanded=True) as status:
                     started = perf_counter()
@@ -592,7 +648,8 @@ def main() -> None:
                             "cost_usd": analysis_cost_usd(capture),
                         }
                         status.update(label="Analyse abgeschlossen", state="complete", expanded=False)
-            st.markdown('<p class="ac-input-hint">Jede Bewertung wird mit Belegen aus deinem Profil geprüft.</p>',
+            remaining = max(0, SESSION_LIMIT - session.analyses)
+            st.markdown(f'<p class="ac-input-hint">Etwa 20 Sek. · Sitzung: noch {_escape(remaining)} von {_escape(SESSION_LIMIT)} Analysen</p>',
                         unsafe_allow_html=True)
 
     if st.session_state.get("result") is not None:
@@ -600,7 +657,7 @@ def main() -> None:
     else:
         st.markdown(
             '<section class="ac-empty"><h2>Von Anforderungen zu einer fundierten Entscheidung.</h2>'
-            '<p>Lade zwei PDFs hoch oder starte mit „Beispiel laden”. Hier erscheint deine Auswertung.</p>'
+            '<p>Lade zwei PDFs hoch oder wähle „Beispiel verwenden”. Hier erscheint deine Auswertung.</p>'
             '<div class="ac-empty-statuses">'
             '<span><i class="ac-dot" style="color:#5f9e76" aria-hidden="true"></i>Erfüllt · vollständig belegt</span>'
             '<span><i class="ac-dot" style="color:#cda34d" aria-hidden="true"></i>Teilweise · zum Teil belegt</span>'

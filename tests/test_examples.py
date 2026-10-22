@@ -108,7 +108,7 @@ def test_example_inputs_wait_for_explicit_analysis_with_limits_and_progress(monk
         assert not at.get("file_uploader")
         assert not at.button(key="analyze_button").disabled
         assert [item.proto.label for item in at.get("download_button")] == [
-            f"{label} ansehen" for label in app.UPLOAD_LABELS[mode]
+            "Ansehen" for _ in app.UPLOAD_LABELS[mode]
         ]
         at.run()
         mocked.assert_not_called()
@@ -119,7 +119,7 @@ def test_example_inputs_wait_for_explicit_analysis_with_limits_and_progress(monk
         assert at.session_state["access_session"].analyses == app.get_limits().daily_count == 1
         assert at.status[0].state == "complete"
         assert not at.get("file_uploader")
-        assert len([button for button in at.button if button.label == "Eigene Datei verwenden"]) == 2
+        assert len([button for button in at.button if button.label == "Entfernen"]) == 2
         at.run()
         mocked.assert_called_once()  # Kein erneuter Start durch Rerun.
         at.button(key="own_document_0").click().run()
@@ -131,7 +131,9 @@ def test_example_inputs_wait_for_explicit_analysis_with_limits_and_progress(monk
         for _ in range(4):
             with app.get_limits().analysis(at.session_state["access_session"]):
                 before_api_request(None)
-        at.button(key="example_button").click().run()
+        at.button(key="example_button").click().run()  # Beide Felder auf eigene Dateien zurücksetzen.
+        assert len(at.get("file_uploader")) == 2
+        at.button(key="example_button").click().run()  # Beispiel erneut auswählen.
         assert not at.exception
         assert not at.info
         mocked.assert_called_once()
