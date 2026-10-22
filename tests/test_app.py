@@ -1,8 +1,10 @@
 import copy
 from io import BytesIO
 import html
+import json
 from pathlib import Path
 import tomllib
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -45,13 +47,13 @@ def ui(monkeypatch, result):
 def test_initial_view_and_mode_dependent_labels(ui):
     at, analyze = ui
     assert not at.exception
-    assert at.title[0].value == "Anforderungs-Check"
+    assert any("Anforderungs-Check" in item.value for item in at.markdown)
     assert at.button[1].disabled
     assert [item.proto.label for item in at.get("file_uploader")] == [
         "Stellenanzeige (PDF)", "Lebenslauf (PDF)",
     ]
     assert all(list(item.proto.type) == [".pdf"] for item in at.get("file_uploader"))
-    at.radio[0].set_value("tender").run()
+    at.get("button_group")[0].set_value("tender").run()
     assert [item.proto.label for item in at.get("file_uploader")] == [
         "Ausschreibung (PDF)", "Firmenprofil (PDF)",
     ]
@@ -65,7 +67,7 @@ def test_example_analysis_progress_download_and_rerun(ui, result):
     at, analyze = ui
     at.button[0].click().run()
     assert not at.button[1].disabled
-    assert "job_anforderungen.pdf" in at.info[0].value
+    assert any("job_anforderungen.pdf" in item.value for item in at.markdown)
     at.button[1].click().run()
     assert not at.exception
     assert not at.error
@@ -75,14 +77,16 @@ def test_example_analysis_progress_download_and_rerun(ui, result):
         (app.EXAMPLES_DIR / "job_profil.pdf").read_bytes(), "job",
     )
     assert at.session_state["result"] == result
+    assert at.session_state["analysis_meta"]["duration_seconds"] >= 0
     assert at.status[0].state == "complete"
     assert [item.value for item in at.status[0].markdown] == list(app.STAGES.values())
-    assert at.get("download_button")[0].proto.label == "Als Markdown herunterladen"
-    assert any("Muss erfüllt 1/1" in item.value and item.proto.allow_html for item in at.markdown)
+    assert [item.proto.label for item in at.get("download_button")] == ["Markdown", "JSON"]
+    assert any("Muss-Kriterien" in item.value and "1/1" in item.value for item in at.markdown)
     at.run()
     analyze.assert_called_once()
-    at.radio[0].set_value("tender").run()
+    at.get("button_group")[0].set_value("tender").run()
     assert "result" not in at.session_state
+    assert "analysis_meta" not in at.session_state
     assert not at.get("download_button")
     assert at.button[1].disabled
 
@@ -94,6 +98,7 @@ def test_results_do_not_leak_between_sessions(ui):
     other = AppTest.from_string("import app\napp.main()").run()
     assert "result" in at.session_state
     assert "result" not in other.session_state
+    assert "analysis_meta" not in other.session_state
     assert not other.get("download_button")
 
 
@@ -127,6 +132,7 @@ def test_errors_are_friendly_and_clear_old_result(ui, caplog, error, expected):
     assert "PRIVATE" not in caplog.text
     assert at.status[0].state == "error"
     assert "result" not in at.session_state
+    assert "analysis_meta" not in at.session_state
     assert not at.get("download_button")
 
 
@@ -160,7 +166,8 @@ def test_upload_change_invalidates_example_and_result(monkeypatch, result):
     class State(dict):
         __getattr__ = dict.__getitem__
         __setattr__ = dict.__setitem__
-    state = State(result=result, use_example=True, example_notice=True)
+    state = State(result=result, analysis_meta={"duration_seconds": 10}, result_filter="Lücken",
+                  use_example=True, example_notice=True)
     monkeypatch.setattr(app.st, "session_state", state)
     app.change_upload()
     assert state == {"use_example": False, "example_notice": False}
@@ -261,3 +268,95 @@ def test_model_is_cached(monkeypatch):
 def test_upload_config_preserves_disabled_watcher():
     config = tomllib.loads(Path(".streamlit/config.toml").read_text(encoding="utf-8-sig"))
     assert config["server"] == {"fileWatcherType": "none", "maxUploadSize": 5}
+    assert config["client"]["toolbarMode"] == "minimal"
+    assert config["theme"]["base"] == "light"
+    assert config["theme"]["primaryColor"] == "#1E40AF"
+
+
+def test_sorting_and_filters_keep_export_order_and_content(result):
+    result["requirements"].extend([
+        {"id": "R3", "text": "Docker", "typ": "muss", "status": "nicht_belegt",
+         "beleg": None, "begruendung": "Beleg im Dokument nicht gefunden"},
+        {"id": "R4", "text": "Git", "typ": "muss", "status": "teilweise",
+         "beleg": {"zitat": "Git", "seite": 1}, "begruendung": "Teilweise belegt"},
+    ])
+    original = copy.deepcopy(result)
+    assert [item["id"] for item in app.filtered_requirements(result)] == ["R3", "R1", "R4", "R2"]
+    assert [item["id"] for item in app.filtered_requirements(result, "Muss")] == ["R3", "R1", "R4"]
+    assert [item["id"] for item in app.filtered_requirements(result, "Lücken")] == ["R3", "R4", "R2"]
+    html_table = app.render_requirements_html(result)
+    assert "nicht belegt · kritisch" in html_table
+    assert "Beleg nicht gefunden" in html_table
+    assert "im Dokument verifiziert · S. 2" in html_table
+    assert result == original
+    assert app.result_markdown(result).index("## R1") < app.result_markdown(result).index("## R3")
+
+
+def test_filter_reruns_keep_full_result_and_exports(ui, result, monkeypatch):
+    at, analyze = ui
+    downloads = []
+    original_download = app.st.download_button
+    def record_download(*args, **kwargs):
+        downloads.append((args[0], kwargs["data"]))
+        return original_download(*args, **kwargs)
+    monkeypatch.setattr(app.st, "download_button", record_download)
+    at.button[0].click().run()
+    at.button[1].click().run()
+    at.get("button_group")[1].set_value("Lücken").run()
+    assert not at.exception
+    analyze.assert_called_once()
+    assert at.session_state["result"] == result
+    table = next(item.value for item in at.markdown if 'class="ac-table"' in item.value)
+    assert "Python entwickeln" not in table
+    assert "Projekte leiten" in table
+    assert "## R1" in dict(downloads[-2:])["Markdown"]
+    assert json.loads(dict(downloads[-2:])["JSON"]) == result
+
+
+def test_cost_uses_separate_models_and_cache_categories():
+    capture = llm.UsageCapture(by_model={
+        "claude-haiku-5-5": llm.TokenUsage(input_tokens=1000, output_tokens=500),
+        "claude-sonnet-5-5": llm.TokenUsage(input_tokens=1000, output_tokens=500,
+            cache_creation_input_tokens=400, cache_creation_1h_input_tokens=100,
+            cache_read_input_tokens=100),
+    })
+    assert app.analysis_cost_usd(capture) == "0.00851"
+    capture.complete = False
+    assert app.analysis_cost_usd(capture) is None
+    assert app.analysis_cost_usd(llm.UsageCapture()) is None
+    assert app.analysis_cost_usd(llm.UsageCapture(by_model={"unknown": llm.TokenUsage()})) is None
+
+
+def test_analysis_metadata_is_measured_without_changing_result(ui, result, monkeypatch):
+    at, analyze = ui
+    clock = iter((100.0, 110.6))
+    monkeypatch.setattr(app, "perf_counter", lambda: next(clock))
+    def measured(*args, **kwargs):
+        llm._capture_response_usage("claude-sonnet-5-5", SimpleNamespace(input_tokens=1000, output_tokens=500))
+        return copy.deepcopy(result)
+    analyze.side_effect = measured
+    at.button[0].click().run()
+    at.button[1].click().run()
+    assert not at.exception
+    assert at.session_state["result"] == result
+    metadata = at.session_state["analysis_meta"]
+    assert metadata["duration_seconds"] == pytest.approx(10.6)
+    assert metadata["cost_usd"] == "0.007"
+    dashboard = next(item.value for item in at.markdown if 'class="ac-metrics"' in item.value)
+    assert "10,6 s" in dashboard
+    assert "0,0070 USD" in dashboard
+
+
+@pytest.mark.parametrize("metadata", [None, {}, {"cost_usd": "invalid"}, {"cost_usd": "NaN"},
+                                     {"cost_usd": "Infinity"}, {"cost_usd": "-1"}])
+def test_unavailable_cost_is_not_displayed_as_free(metadata):
+    assert app.format_cost(metadata) == "—"
+
+
+def test_filename_and_requirement_id_are_escaped(result):
+    attack = '<img src=x onerror="alert(1)">'
+    result["requirements"][0]["id"] = attack
+    assert attack not in app.render_requirements_html(result)
+    assert html.escape(attack, quote=True) in app.render_requirements_html(result)
+    assert attack not in app.render_file_note(attack)
+    assert app.render_file_note(attack).count(html.escape(attack, quote=True)) == 2

@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import base64
 import html
+import json
+import math
+from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 from pathlib import Path
 import re
+from time import perf_counter
 from typing import Any
 
 import streamlit as st
@@ -14,8 +20,9 @@ from copilot.index import get_embedding_model
 from copilot.ingest import DocumentTooLong, PdfExtractionError, PdfWithoutText
 from copilot.llm import (
     LlmApiError, LlmError, LlmResponseError, MissingApiKeyError,
-    OutputTokenLimit, RequestTooLarge,
+    OutputTokenLimit, RequestTooLarge, UsageCapture, capture_token_usage,
 )
+from copilot.pricing import calculate_cost_usd
 
 
 TITLE = "Anforderungs-Check"
@@ -28,43 +35,21 @@ STAGES = {
 }
 STATUS_LABELS = {"erfuellt": "erfüllt", "teilweise": "teilweise", "nicht_belegt": "nicht belegt"}
 
-RESULT_CSS = """
-<style>
-.ac-result { color: inherit; line-height: 1.65; overflow-wrap: anywhere; }
-.ac-result * { box-sizing: border-box; }
-.ac-result .ac-summary, .ac-result .ac-card {
-    border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
-    border-radius: 16px; padding: 1.35rem; margin-bottom: 1rem;
-    background: color-mix(in srgb, currentColor 3%, transparent);
-}
-.ac-result .ac-summary { display: flex; gap: 1.4rem; align-items: center; flex-wrap: wrap; }
-.ac-result .ac-overview { flex: 1; min-width: 12rem; }
-.ac-result .ac-score { border-radius: 14px; padding: .65rem 1rem; text-align: center; }
-.ac-result .ac-score strong { display: block; font-size: 3rem; line-height: 1.15; }
-.ac-result .ac-score span { font-size: .85rem; }
-.ac-result .ac-must { font-size: 1.15rem; font-weight: 700; margin: 0 0 .4rem; }
-.ac-result .ac-badges { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: .8rem; }
-.ac-result .ac-badge { border-radius: 999px; padding: .15rem .7rem; font-size: .85rem; font-weight: 650; }
-.ac-result .ac-green { background: #dcfce7; color: #166534; }
-.ac-result .ac-yellow { background: #fef3c7; color: #854d0e; }
-.ac-result .ac-red { background: #fee2e2; color: #991b1b; }
-.ac-result .ac-gray { background: #e5e7eb; color: #374151; }
-.ac-result .ac-type { border: 1px solid currentColor; }
-.ac-result h3 { color: inherit; font-size: 1.12rem; line-height: 1.5; margin: 0 0 .8rem; padding: 0; }
-.ac-result p { margin: .5rem 0 0; white-space: pre-wrap; }
-.ac-result blockquote {
-    color: inherit; opacity: 1; margin: 1rem 0; padding: .1rem 0 .1rem 1rem;
-    border-left: 3px solid color-mix(in srgb, currentColor 40%, transparent);
-    white-space: pre-wrap;
-}
-.ac-result cite { display: block; font-style: normal; font-size: .85rem; margin-top: .35rem; }
-@media (max-width: 480px) {
-    .ac-result .ac-summary, .ac-result .ac-card { padding: 1rem; }
-    .ac-result .ac-summary { gap: 1rem; }
-    .ac-result .ac-score strong { font-size: 2.5rem; }
-}
-</style>
-"""
+
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+REPO_URL = "https://github.com/WxExLGHTZ/job-application-rag"
+FILTERS = ("Alle", "Muss", "Lücken")
+LOGO_SVG = '<svg class="ac-logo" viewBox="0 0 36 36" fill="none" aria-hidden="true"><rect width="36" height="36" rx="9" fill="#1E40AF"/><path d="M12 9.5h8l5 5V27H12V9.5Z" stroke="white" stroke-width="1.5" stroke-linejoin="round"/><path d="M20 9.5V15h5M15.5 20l2 2 4.5-4.5" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+LOCK_SVG = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="3.5" y="7" width="9" height="7" rx="1.5" stroke="currentColor" stroke-width="1.2"/><path d="M5.5 7V4.5a2.5 2.5 0 0 1 5 0V7M8 10v1" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>'
+FILE_SVG = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 2h5l3 3v9H4V2Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M9 2v3h3M6 8h4M6 10.5h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>'
+
+
+@lru_cache(maxsize=1)
+def app_styles() -> str:
+    """Nur statische Styles und die lokale Schriftdatei werden gemeinsam gecacht."""
+    font = base64.b64encode((ASSETS_DIR / "fonts" / "InterVariable.woff2").read_bytes()).decode("ascii")
+    css = (ASSETS_DIR / "app.css").read_text(encoding="utf-8")
+    return "<style>" + css.replace("__INTER_FONT__", "data:font/woff2;base64," + font) + "</style>"
 
 
 @st.cache_resource(show_spinner="Embedding-Modell wird geladen …")
@@ -89,36 +74,144 @@ def status_color(requirement: dict[str, Any]) -> str:
     return "red" if requirement["typ"] == "muss" else "gray"
 
 
-def render_result_html(result: dict[str, Any]) -> str:
-    """CSS-Klassen kommen nur aus festen Zuordnungen, sämtliche Texte sind escaped."""
-    summary = result["summary"]
-    parts = [
-        RESULT_CSS,
-        '<section class="ac-result" aria-label="Analyseergebnis">',
-        '<div class="ac-summary">',
-        f'<div class="ac-score ac-{score_color(summary["score"])}">'
-        f'<strong>{_escape(summary["score"])}</strong><span>von 100 Punkten</span></div>',
-        '<div class="ac-overview">',
-        f'<p class="ac-must">Muss erfüllt {_escape(summary["muss_erfuellt"])}</p>',
-        f'<p>{_escape(summary["fazit"])}</p></div></div>',
+
+def analysis_cost_usd(capture: UsageCapture) -> str | None:
+    """Messdaten dürfen ein erfolgreiches Analyseergebnis niemals verhindern."""
+    if not capture.complete or not capture.by_model:
+        return None
+    try:
+        return str(sum(
+            (calculate_cost_usd(model, usage.to_dict())
+             for model, usage in capture.by_model.items()), Decimal(0),
+        ))
+    except Exception:
+        return None
+
+
+def format_duration(metadata: dict[str, Any] | None) -> str:
+    value = (metadata or {}).get("duration_seconds")
+    if isinstance(value, (float, int)) and math.isfinite(value) and value >= 0:
+        return f"{value:.1f}".replace(".", ",") + " s"
+    return "—"
+
+
+def format_cost(metadata: dict[str, Any] | None) -> str:
+    value = (metadata or {}).get("cost_usd")
+    if value is not None:
+        try:
+            amount = Decimal(str(value))
+            if amount.is_finite() and amount >= 0:
+                return f"{amount:.4f}".replace(".", ",") + " USD"
+        except (InvalidOperation, ValueError):
+            pass
+    return "—"
+
+
+def filtered_requirements(result: dict[str, Any], filter_name: str = "Alle") -> list[dict[str, Any]]:
+    """Nur die Darstellung sortieren/filtern; Ergebnis und Exporte bleiben vollständig."""
+    items = [
+        item for item in result["requirements"]
+        if (filter_name != "Muss" or item["typ"] == "muss")
+        and (filter_name != "Lücken" or item["status"] != "erfuellt")
     ]
-    for item in result["requirements"]:
-        parts.extend([
-            '<article class="ac-card">',
-            '<div class="ac-badges">',
-            f'<span class="ac-badge ac-type">{_escape("Muss" if item["typ"] == "muss" else "Kann")}</span>',
-            f'<span class="ac-badge ac-{status_color(item)}">{_escape(STATUS_LABELS[item["status"]])}</span>',
-            '</div>',
-            f'<h3>{_escape(item["text"])}</h3>',
-        ])
+    return sorted(items, key=lambda item:
+                  0 if item["typ"] == "muss" and item["status"] == "nicht_belegt"
+                  else 1 if item["typ"] == "muss" else 2)
+
+
+def status_badge(item: dict[str, Any]) -> str:
+    color = status_color(item)
+    label = STATUS_LABELS[item["status"]]
+    if color == "red":
+        label += " · kritisch"
+    return (f'<span class="ac-status ac-{color}"><span class="ac-dot" aria-hidden="true"></span>'
+            f'{_escape(label)}</span>')
+
+
+def render_dashboard_html(result: dict[str, Any], metadata: dict[str, Any] | None = None) -> str:
+    summary = result["summary"]
+    score = max(0, min(100, int(summary["score"])))
+    ring_color = {"green": "#339265", "yellow": "#c4932e", "red": "#c4635c"}[score_color(score)]
+    counts = {status: sum(item["status"] == status for item in result["requirements"])
+              for status in STATUS_LABELS}
+    total = max(1, len(result["requirements"]))
+    distributions = "".join(
+        f'<span style="width:{_escape(str(counts[status] * 100 / total))}%;background:{color}"></span>'
+        for status, color in (("erfuellt", "#6ea884"), ("teilweise", "#dbb65d"),
+                              ("nicht_belegt", "#c9cfd9"))
+    )
+    legend = "".join(
+        f'<span><i class="ac-dot" style="color:{color}" aria-hidden="true"></i>'
+        f'{_escape(STATUS_LABELS[status])}<b>{_escape(counts[status])}</b></span>'
+        for status, color in (("erfuellt", "#6ea884"), ("teilweise", "#d4a94d"),
+                              ("nicht_belegt", "#aeb8c7"))
+    )
+    return (
+        '<section class="ac-result" aria-label="Zusammenfassung der Analyse"><div class="ac-metrics">'
+        '<div class="ac-metric"><div class="ac-metric-label">Gesamtscore</div>'
+        '<div class="ac-score-row">'
+        f'<div class="ac-score-ring" style="--ac-ring:{ring_color};--ac-progress:{_escape(score)}%" '
+        f'role="img" aria-label="Gesamtscore: {_escape(score)} von 100">'
+        f'<div class="ac-score-inner">{_escape(score)}</div></div>'
+        '<div class="ac-score-caption"><strong>von 100</strong>Gewichtete Passung</div></div></div>'
+        '<div class="ac-metric"><div class="ac-metric-label">Muss-Kriterien</div>'
+        f'<div class="ac-metric-value">{_escape(summary["muss_erfuellt"])}</div>'
+        '<div class="ac-metric-note">vollständig erfüllt</div></div>'
+        '<div class="ac-metric"><div class="ac-metric-label">Bewertungen im Überblick</div>'
+        f'<div class="ac-distribution" aria-hidden="true">{distributions}</div>'
+        f'<div class="ac-distribution-key">{legend}</div></div>'
+        '<div class="ac-metric"><div class="ac-metric-label">Dauer &amp; Kosten</div>'
+        f'<div class="ac-time">{_escape(format_duration(metadata))}</div>'
+        f'<div class="ac-cost"><span>{_escape(format_cost(metadata))}</span><small>API-Kosten</small></div>'
+        '<div class="ac-metric-note">Für diese Analyse</div></div></div>'
+        '<div class="ac-verdict"><div class="ac-verdict-label">Fazit</div>'
+        f'<p>{_escape(summary["fazit"])}</p></div></section>'
+    )
+
+
+def render_requirements_html(result: dict[str, Any], filter_name: str = "Alle") -> str:
+    items = filtered_requirements(result, filter_name)
+    if not items:
+        return '<div class="ac-table-wrap ac-no-matches">Keine Anforderungen für diesen Filter.</div>'
+    rows = []
+    for item in items:
+        evidence = '<span style="color:#98a0ae">Kein Beleg vorhanden</span>'
         if item["beleg"] is not None:
-            parts.append(
-                f'<blockquote><em>„{_escape(item["beleg"]["zitat"])}“</em>'
-                f'<cite>S. {_escape(item["beleg"]["seite"])}</cite></blockquote>'
+            evidence = (
+                f'<blockquote><em>„{_escape(item["beleg"]["zitat"])}“</em></blockquote>'
+                f'<span class="ac-verified">im Dokument verifiziert · S. {_escape(item["beleg"]["seite"])}</span>'
             )
-        parts.append(f'<p>{_escape(item["begruendung"])}</p></article>')
-    parts.append("</section>")
-    return "".join(parts)
+        elif item["begruendung"] == "Beleg im Dokument nicht gefunden":
+            evidence = '<span class="ac-evidence-missing">Beleg nicht gefunden</span>'
+        rows.append(
+            f'<tr><td class="ac-requirement" data-label="Anforderung">'
+            f'<span class="ac-row-id">{_escape(item["id"])}</span>{_escape(item["text"])}</td>'
+            f'<td data-label="Typ"><span class="ac-type">{_escape("Muss" if item["typ"] == "muss" else "Kann")}</span></td>'
+            f'<td data-label="Status">{status_badge(item)}</td>'
+            f'<td data-label="Beleg">{evidence}</td>'
+            f'<td data-label="Begründung">{_escape(item["begruendung"])}</td></tr>'
+        )
+    return (
+        '<div class="ac-result ac-table-wrap"><table class="ac-table" aria-label="Anforderungen und Belege">'
+        '<colgroup><col style="width:25%"><col style="width:7%"><col style="width:16%">'
+        '<col style="width:29%"><col style="width:23%"></colgroup>'
+        '<thead><tr><th scope="col">Anforderung</th><th scope="col">Typ</th>'
+        '<th scope="col">Status</th><th scope="col">Beleg</th><th scope="col">Begründung</th></tr></thead>'
+        '<tbody>' + "".join(rows) + '</tbody></table></div>'
+    )
+
+
+def render_result_html(result: dict[str, Any], metadata: dict[str, Any] | None = None) -> str:
+    return render_dashboard_html(result, metadata) + render_requirements_html(result)
+
+
+def render_file_note(name: str) -> str:
+    return f'<div class="ac-file">{FILE_SVG}<span title="{_escape(name)}">{_escape(name)}</span></div>'
+
+
+def render_step(number: int, title: str) -> None:
+    st.markdown(f'<div class="ac-step"><span class="ac-step-number">{_escape(number)}</span>'
+                f'<span>{_escape(title)}</span></div>', unsafe_allow_html=True)
 
 
 def _markdown_text(value: Any, *, line_start: bool = False) -> str:
@@ -198,6 +291,8 @@ def error_message(error: Exception) -> str:
 
 def clear_result() -> None:
     st.session_state.pop("result", None)
+    st.session_state.pop("analysis_meta", None)
+    st.session_state.pop("result_filter", None)
 
 
 def change_mode() -> None:
@@ -233,11 +328,22 @@ def read_documents(requirements_upload, profile_upload, use_example: bool) -> tu
     return requirements_upload.getvalue(), profile_upload.getvalue()
 
 
+
 def main() -> None:
-    st.set_page_config(page_title=TITLE, layout="centered")
-    st.title(TITLE)
-    st.write("Lade ein Anforderungsdokument und ein Profil hoch. Die App findet jede Anforderung und prüft sie mit einem wörtlichen Beleg aus dem Profil.")
-    st.caption("Deine Dateien werden nur für diese Analyse im Arbeitsspeicher verarbeitet und nicht gespeichert. Für die Auswertung wird der Text an die Claude API von Anthropic übermittelt.")
+    st.set_page_config(page_title=TITLE, layout="wide", initial_sidebar_state="collapsed")
+    st.markdown(app_styles(), unsafe_allow_html=True)
+    st.markdown(
+        f'<header class="ac-topbar"><div class="ac-brand">{LOGO_SVG}'
+        f'<span>{_escape(TITLE)}</span></div><span class="ac-demo">Demo</span></header>'
+        '<section class="ac-intro"><div class="ac-eyebrow">Dokumente vergleichen. Belege verstehen.</div>'
+        '<h1>Anforderungen klar prüfen.</h1>'
+        '<p class="ac-lead">Vergleiche Stellenanzeigen oder Ausschreibungen mit einem Profil – '
+        'Anforderung für Anforderung, mit wörtlichen Belegen.</p>'
+        f'<div class="ac-privacy">{LOCK_SVG}<span>'
+        'Deine Dateien werden nur für diese Analyse im Arbeitsspeicher verarbeitet und nicht gespeichert. '
+        'Für die Auswertung wird der Text an die Claude API von Anthropic übermittelt.'
+        '</span></div></section>', unsafe_allow_html=True,
+    )
 
     for key, value in (("upload_generation", 0), ("use_example", False), ("example_notice", False)):
         st.session_state.setdefault(key, value)
@@ -247,55 +353,115 @@ def main() -> None:
         st.error("Das Embedding-Modell konnte nicht geladen werden. Bitte versuche es später erneut.")
         return
 
-    mode = st.radio("Was möchtest du prüfen?", options=list(MODES), format_func=MODES.get,
-                    key="mode", on_change=change_mode)
-    labels = UPLOAD_LABELS[mode]
-    generation = st.session_state.upload_generation
-    requirements_upload = st.file_uploader(
-        f"{labels[0]} (PDF)", type=["pdf"], key=f"requirements_{generation}",
-        on_change=change_upload, help="Eine PDF-Datei, maximal 5 MB.",
-    )
-    profile_upload = st.file_uploader(
-        f"{labels[1]} (PDF)", type=["pdf"], key=f"profile_{generation}",
-        on_change=change_upload, help="Eine PDF-Datei, maximal 5 MB.",
-    )
-    st.button("Beispiel laden", on_click=select_example)
-    if st.session_state.example_notice:
-        st.info("Das Beispiel für Ausschreibung und Firmenprofil folgt noch.")
-    if st.session_state.use_example:
-        st.info("Beispiel geladen: job_anforderungen.pdf und job_profil.pdf. Klicke auf „Analysieren“, um die Auswertung zu starten.")
+    with st.container(key="input_card"):
+        st.markdown('<div class="ac-card-title"><h2>Analyse vorbereiten</h2>'
+                    '<span>Zwei Dokumente. Ein klarer Überblick.</span></div>', unsafe_allow_html=True)
+        with st.container(key="step_mode"):
+            render_step(1, "Vergleich auswählen")
+            mode = st.segmented_control(
+                "Was möchtest du prüfen?", options=list(MODES), format_func=MODES.get,
+                default="job", required=True, key="mode", on_change=change_mode,
+                label_visibility="collapsed", width="stretch",
+            )
+        labels = UPLOAD_LABELS[mode]
+        generation = st.session_state.upload_generation
+        with st.container(key="step_documents"):
+            render_step(2, "Dokumente hinzufügen")
+            with st.container(key="document_uploads"):
+                left, right = st.columns(2, gap="medium")
+                with left:
+                    requirements_upload = st.file_uploader(
+                        f"{labels[0]} (PDF)", type=["pdf"], key=f"requirements_{generation}",
+                        on_change=change_upload, help="Eine PDF-Datei, maximal 5 MB.",
+                    )
+                    if st.session_state.use_example:
+                        st.markdown(render_file_note("job_anforderungen.pdf"), unsafe_allow_html=True)
+                    elif requirements_upload is not None:
+                        st.markdown(render_file_note(requirements_upload.name), unsafe_allow_html=True)
+                with right:
+                    profile_upload = st.file_uploader(
+                        f"{labels[1]} (PDF)", type=["pdf"], key=f"profile_{generation}",
+                        on_change=change_upload, help="Eine PDF-Datei, maximal 5 MB.",
+                    )
+                    if st.session_state.use_example:
+                        st.markdown(render_file_note("job_profil.pdf"), unsafe_allow_html=True)
+                    elif profile_upload is not None:
+                        st.markdown(render_file_note(profile_upload.name), unsafe_allow_html=True)
+            st.button("Beispiel laden", key="example_button", type="secondary", on_click=select_example)
+            if st.session_state.example_notice:
+                st.info("Das Beispiel für Ausschreibung und Firmenprofil folgt noch.")
+            if st.session_state.use_example:
+                st.caption("Fiktive Beispieldateien ausgewählt. Du kannst die Analyse jetzt starten.")
 
-    ready = st.session_state.use_example or (
-        requirements_upload is not None and profile_upload is not None
-    )
-    if st.button("Analysieren", type="primary", disabled=not ready):
-        clear_result()
-        with st.status("Analyse wird vorbereitet …", expanded=True) as status:
-            try:
-                documents = read_documents(requirements_upload, profile_upload, st.session_state.use_example)
+        with st.container(key="step_analyze"):
+            render_step(3, "Anforderungen prüfen")
+            ready = st.session_state.use_example or (
+                requirements_upload is not None and profile_upload is not None
+            )
+            if st.button("Analysieren", key="analyze_button", type="primary", disabled=not ready, width="stretch"):
+                clear_result()
+                with st.status("Analyse wird vorbereitet …", expanded=True) as status:
+                    started = perf_counter()
+                    try:
+                        documents = read_documents(requirements_upload, profile_upload, st.session_state.use_example)
 
-                def on_progress(stage: pipeline.ProgressStage) -> None:
-                    label = STAGES[stage]
-                    status.update(label=f"{label} …")
-                    status.write(label)
+                        def on_progress(stage: pipeline.ProgressStage) -> None:
+                            label = STAGES[stage]
+                            status.update(label=f"{label} …")
+                            status.write(label)
 
-                result = pipeline.analyze(*documents, mode, on_progress=on_progress)
-            except Exception as error:
-                status.update(label="Analyse nicht abgeschlossen", state="error", expanded=False)
-                st.error(error_message(error))
-            else:
-                st.session_state.result = result
-                status.update(label="Analyse abgeschlossen", state="complete", expanded=False)
+                        with capture_token_usage() as capture:
+                            result = pipeline.analyze(*documents, mode, on_progress=on_progress)
+                    except Exception as error:
+                        status.update(label="Analyse nicht abgeschlossen", state="error", expanded=False)
+                        st.error(error_message(error))
+                    else:
+                        st.session_state.result = result
+                        st.session_state.analysis_meta = {
+                            "duration_seconds": perf_counter() - started,
+                            "cost_usd": analysis_cost_usd(capture),
+                        }
+                        status.update(label="Analyse abgeschlossen", state="complete", expanded=False)
+            st.markdown('<p class="ac-input-hint">Jede Bewertung wird mit Belegen aus deinem Profil geprüft.</p>',
+                        unsafe_allow_html=True)
 
     if st.session_state.get("result") is not None:
         result = st.session_state.result
-        st.subheader("Dein Ergebnis")
-        st.markdown(render_result_html(result), unsafe_allow_html=True)
-        st.download_button(
-            "Als Markdown herunterladen", data=result_markdown(result),
-            file_name="anforderungs-check.md", mime="text/markdown; charset=utf-8",
-            on_click="ignore",
+        st.markdown('<div class="ac-section-title"><h2>Deine Auswertung</h2>'
+                    f'<span>{_escape(len(result["requirements"]))} Anforderungen geprüft</span></div>',
+                    unsafe_allow_html=True)
+        st.markdown(render_dashboard_html(result, st.session_state.get("analysis_meta")), unsafe_allow_html=True)
+        st.markdown('<div class="ac-section-title"><h2>Anforderungen im Detail</h2>'
+                    '<span>Nach Priorität sortiert</span></div>', unsafe_allow_html=True)
+        selected_filter = st.segmented_control(
+            "Anforderungen filtern", FILTERS, default="Alle", required=True, key="result_filter",
+            label_visibility="collapsed", width=264,
         )
+        st.markdown(render_requirements_html(result, selected_filter), unsafe_allow_html=True)
+        with st.container(key="export_actions", horizontal=True, gap="small"):
+            st.download_button(
+                "Markdown", data=result_markdown(result), file_name="anforderungs-check.md",
+                mime="text/markdown; charset=utf-8", on_click="ignore",
+            )
+            st.download_button(
+                "JSON", data=json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False),
+                file_name="anforderungs-check.json", mime="application/json", on_click="ignore",
+            )
+    else:
+        st.markdown(
+            '<section class="ac-empty"><h2>Von Anforderungen zu einer fundierten Entscheidung.</h2>'
+            '<p>Lade zwei PDFs hoch oder starte mit „Beispiel laden”. Hier erscheint deine Auswertung.</p>'
+            '<div class="ac-empty-statuses">'
+            '<span><i class="ac-dot" style="color:#5f9e76" aria-hidden="true"></i>Erfüllt · vollständig belegt</span>'
+            '<span><i class="ac-dot" style="color:#cda34d" aria-hidden="true"></i>Teilweise · zum Teil belegt</span>'
+            '<span><i class="ac-dot" style="color:#aeb8c7" aria-hidden="true"></i>Nicht belegt · Nachweis fehlt</span>'
+            '</div></section>', unsafe_allow_html=True,
+        )
+    st.markdown(
+        '<div class="ac-footer"><span>Gebaut von WxExLGHTZ</span>'
+        f'<a href="{REPO_URL}" target="_blank" rel="noopener noreferrer">Projekt auf GitHub</a></div>',
+        unsafe_allow_html=True,
+    )
 
 
 if __name__ == "__main__":

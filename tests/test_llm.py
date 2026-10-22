@@ -356,3 +356,44 @@ def test_no_score_or_usage_placeholders_in_model_payload(messages):
     assert '"summary"' not in prompt
     assert '"score"' not in prompt
     assert '"usage"' not in prompt
+
+
+def test_passive_capture_counts_models_and_correction_attempts(messages, monkeypatch):
+    monkeypatch.delenv("MODEL_EXTRACT", raising=False)
+    monkeypatch.delenv("MODEL_ASSESS", raising=False)
+    messages.create.side_effect = [response("kein JSON"), response('[{"text":"SQL","typ":"muss"}]'),
+                                   response(assessment_json("R1"))]
+    with llm.capture_token_usage() as capture:
+        llm.extract_requirements("SQL")
+        llm.assess_requirements(context("R1"))
+    assert capture.complete
+    assert capture.by_model[llm.DEFAULT_EXTRACT_MODEL].response_count == 2
+    assert capture.by_model[llm.DEFAULT_EXTRACT_MODEL].output_tokens == 10
+    assert capture.by_model[llm.DEFAULT_ASSESS_MODEL].response_count == 1
+    assert capture.by_model[llm.DEFAULT_ASSESS_MODEL].input_tokens == 10
+
+
+def test_capture_is_context_local_and_resets_after_exception():
+    from contextvars import Context
+    usage = SimpleNamespace(input_tokens=10, output_tokens=5)
+    with llm.capture_token_usage() as first:
+        llm._capture_response_usage("first", usage)
+        with pytest.raises(RuntimeError):
+            with llm.capture_token_usage() as nested:
+                llm._capture_response_usage("nested", usage)
+                raise RuntimeError("Test")
+        Context().run(llm._capture_response_usage, "other-session", usage)
+        llm._capture_response_usage("first", usage)
+    llm._capture_response_usage("outside", usage)
+    assert set(first.by_model) == {"first"}
+    assert first.by_model["first"].response_count == 2
+    assert set(nested.by_model) == {"nested"}
+    assert llm._ACTIVE_USAGE_CAPTURE.get() is None
+
+
+def test_capture_failure_does_not_change_successful_response(messages, monkeypatch):
+    messages.create.return_value = response('[{"text":"SQL","typ":"muss"}]')
+    with llm.capture_token_usage() as capture:
+        monkeypatch.setattr(llm.TokenUsage, "add_response", Mock(side_effect=RuntimeError("Messfehler")))
+        assert llm.extract_requirements("SQL") == [{"id": "R1", "text": "SQL", "typ": "muss"}]
+    assert not capture.complete

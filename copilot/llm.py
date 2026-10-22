@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import asdict, dataclass
-from typing import Any, Callable, Literal
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import asdict, dataclass, field
+from typing import Any, Callable, Iterator, Literal
 
 from anthropic import Anthropic, APIConnectionError, APIStatusError, APITimeoutError, transform_schema
 from pydantic import TypeAdapter, ValidationError
@@ -128,6 +130,40 @@ class TokenUsage:
             + self.cache_creation_input_tokens + self.cache_read_input_tokens
         )
         return result
+
+
+@dataclass
+class UsageCapture:
+    """Nur Modellnamen und Zähler eines isolierten UI-Analyseaufrufs."""
+
+    by_model: dict[str, TokenUsage] = field(default_factory=dict)
+    complete: bool = True
+
+
+_ACTIVE_USAGE_CAPTURE: ContextVar[UsageCapture | None] = ContextVar(
+    "copilot_usage_capture", default=None,
+)
+
+
+@contextmanager
+def capture_token_usage() -> Iterator[UsageCapture]:
+    """Beobachte API-Verbrauch im aktuellen Kontext, ohne die Pipeline zu verändern."""
+    capture = UsageCapture()
+    token = _ACTIVE_USAGE_CAPTURE.set(capture)
+    try:
+        yield capture
+    finally:
+        _ACTIVE_USAGE_CAPTURE.reset(token)
+
+
+def _capture_response_usage(model: str, usage: Any) -> None:
+    capture = _ACTIVE_USAGE_CAPTURE.get()
+    if capture is not None:
+        try:
+            capture.by_model.setdefault(model, TokenUsage()).add_response(usage)
+        except Exception:
+            # Messfehler beeinflussen weder Analyseergebnis noch Fehlerbehandlung.
+            capture.complete = False
 
 
 def _mode_instruction(mode: Mode) -> str:
@@ -467,6 +503,8 @@ def _send_message(
     if usage is not None:
         # Vor Stop-/JSON-Prüfung zählen: auch eine unbrauchbare Antwort kostet Tokens.
         usage.add_response(response.usage)
+
+    _capture_response_usage(model, response.usage)
 
     stop_reason = getattr(response, "stop_reason", None)
     if stop_reason == "max_tokens":
