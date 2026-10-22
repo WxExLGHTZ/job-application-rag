@@ -59,10 +59,9 @@ button:focus-visible, a:focus-visible { outline: 3px solid #93b4ff !important; o
 .st-key-document_heading { flex-wrap: nowrap; gap: var(--ac-space-2); min-height: 32px; }
 .st-key-document_heading > [data-testid="stElementContainer"] { min-width: 0; }
 .st-key-example_button { flex: 0 1 auto; }
-.st-key-example_button button { font-size: 12px; min-height: 32px; padding: 4px 8px; background: transparent; border: 1px solid transparent; color: var(--ac-blue); border-radius: 6px; }
+.st-key-example_button button { font-size: 12px; font-weight: 550; min-height: 32px; padding: 4px 10px; background: #edf2ff; border: 1px solid #bfcef5; color: var(--ac-blue); border-radius: 6px; }
 .st-key-example_button button p { font-size: 12px; line-height: 1.4; }
-.st-key-example_button button:hover { background: #edf2ff; color: #193992; border-color: transparent; }
-.st-key-example_button button:focus:not(:focus-visible) { border-color: transparent !important; }
+.st-key-example_button button:hover { background: #dfe8ff; color: #193992; border-color: #9fb6ed; }
 .ac-example-label { font-size: 13px; font-weight: 550; line-height: 20px; }
 :is(.st-key-file_card_0, .st-key-file_card_1) { height: 64px; min-height: 64px; flex-shrink: 0; box-sizing: border-box; padding: 8px 12px; border: 1px solid var(--ac-line); border-radius: 8px; background: #fff; }
 :is(.st-key-file_card_0, .st-key-file_card_1) [data-testid="stHorizontalBlock"] { flex-wrap: nowrap; align-items: center; gap: 8px; height: 100%; }
