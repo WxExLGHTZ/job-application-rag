@@ -14,7 +14,8 @@ from pydantic import TypeAdapter, ValidationError
 from copilot.schema import Assessment, AssessmentResponse, Evidence, ExtractedRequirement
 
 
-DEFAULT_MODEL = "claude-haiku-5-5"
+DEFAULT_EXTRACT_MODEL = "claude-haiku-5-5"
+DEFAULT_ASSESS_MODEL = "claude-sonnet-5-5"
 # Niedrigste getestete Einstellung; Schema-Prüfung und Korrekturversuch bleiben aktiv.
 MODEL_EFFORT = "low"
 THINKING_TYPE = "disabled"
@@ -103,6 +104,7 @@ class TokenUsage:
     output_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+    cache_creation_1h_input_tokens: int = 0
     response_count: int = 0
 
     def add_response(self, usage: Any) -> None:
@@ -112,6 +114,10 @@ class TokenUsage:
             "cache_read_input_tokens",
         ):
             setattr(self, field, getattr(self, field) + (getattr(usage, field, 0) or 0))
+        cache_creation = getattr(usage, "cache_creation", None)
+        self.cache_creation_1h_input_tokens += (
+            getattr(cache_creation, "ephemeral_1h_input_tokens", 0) or 0
+        )
         self.response_count += 1
 
     def to_dict(self) -> dict[str, int]:
@@ -128,7 +134,7 @@ def _mode_instruction(mode: Mode) -> str:
     if mode == "job":
         return (
             "Analysiere eine Stellenanzeige gegen einen Lebenslauf. "
-            "Pruefe Anforderungen, Aufgaben und Erwartungen an die bewerbende Person."
+            "Prüfe Anforderungen an die bewerbende Person."
         )
     if mode == "tender":
         return (
@@ -136,6 +142,33 @@ def _mode_instruction(mode: Mode) -> str:
             "und Leistungsanforderungen anhand belegter Referenzen, Zertifikate "
             "und Kapazitaeten."
         )
+    raise ValueError("Der Modus muss 'job' oder 'tender' sein.")
+
+
+def _extraction_scope(mode: Mode) -> str:
+    if mode == "job":
+        return """
+Modus job: Extrahiere ausschließlich Anforderungen an die Person: Qualifikationen,
+Kenntnisse, Erfahrungen, Abschlüsse und Sprachen. Aufgabenbeschreibungen der Stelle
+sind ausgeschlossen, auch wenn dafür bestimmte Fähigkeiten erforderlich wären.
+Extrahiere nichts aus reinen Aufgabenabschnitten wie "Deine Aufgaben" oder aus
+Tätigkeitsbeschreibungen wie "Du entwickelst ...". Leite daraus keine zusätzlichen
+Kenntnis- oder Erfahrungsanforderungen ab. Relevant sind die tatsächlichen
+Anforderungen an die Person, etwa unter "Dein Profil" oder "Das bringst du mit".
+Bei gemischten Abschnitten entscheidet der Inhalt des einzelnen Punkts.
+Arbeitszeit, Ort, Vertragsart und Homeoffice sind Rahmenbedingungen, keine
+fachlichen Anforderungen an die Person.
+""".strip()
+    if mode == "tender":
+        return """
+Modus tender: Extrahiere Eignungskriterien wie Referenzen, Zertifikate, Umsatz und
+Personal sowie fachliche Leistungsanforderungen an die ausgeschriebene Leistung.
+Fristen und Formalien der Angebotsabgabe sind ausgeschlossen: etwa Abgabetermin,
+Einreichungsweg, Dateiformat oder Unterschrift des Angebots. Verwechsle diese nicht
+mit geforderten Liefer- oder Leistungsfristen; diese gehören ebenso wie geforderte
+Leistungsorte und Servicezeiten zur Leistung.
+Bei gemischten Abschnitten entscheidet der Inhalt des einzelnen Punkts.
+""".strip()
     raise ValueError("Der Modus muss 'job' oder 'tender' sein.")
 
 
@@ -176,17 +209,50 @@ def extract_requirements(
     if not job_ad_text.strip():
         raise ValueError("Das Anforderungsdokument ist leer.")
 
-    system_prompt = _mode_instruction(mode) + "\n" + DATA_RULE + "\n" + """
-Extrahiere nur konkrete, gegen das Profil prüfbare Anforderungen und Aufgaben.
-Schließe Benefits, Unternehmensbeschreibung und Rahmenbedingungen ausdrücklich aus:
-Arbeitszeit, Ort, Vertragsart und Homeoffice sind keine Anforderungen.
+    system_prompt = (_mode_instruction(mode) + "\n" + DATA_RULE + "\n"
+                     + _extraction_scope(mode) + "\n" + """
+Extrahiere nur konkrete, gegen das Profil prüfbare Anforderungen des gewählten Modus.
+Schließe Benefits und Unternehmensbeschreibung ausdrücklich aus.
 Klassifiziere ausdrücklich geforderte Fähigkeiten/Nachweise als "muss".
-Wünschenswertes (Plus, idealerweise) ist "kann". Reine Aufgabenbeschreibungen sind
-"kann", außer das Dokument verlangt die entsprechende Fähigkeit ausdrücklich.
+Wünschenswertes (Plus, idealerweise) ist "kann". Bei tender sind verbindliche
+Eignungs- und Leistungsanforderungen "muss", ausdrücklich optionale Anforderungen "kann".
+Arbeite alle relevanten Abschnitte vollständig in Dokumentreihenfolge ab. Jeder
+Aufzählungspunkt bzw. jede eigenständige Anforderung im relevanten Abschnitt ergibt
+mindestens einen Eintrag. Fasse unterschiedliche Punkte niemals zu einem Eintrag
+zusammen und lasse keinen aus, auch keine optionalen oder ähnlich klingenden Punkte.
+Bei einem Punkt ohne Aufzählungszeichen gilt dieselbe Regel.
+Mit Aufzählungspunkt ist ein struktureller Listenpunkt bzw. Absatz im Original
+gemeint, nicht jede mit Komma genannte Fähigkeit innerhalb desselben Punkts.
+Die Vollständigkeitsregel verlangt NICHT einen Eintrag pro Oder-Alternative:
+Eine vollständige Oder-Gruppe in einem Eintrag deckt ihren ganzen Ursprungspunkt ab
+und ist keine unzulässige Zusammenfassung verschiedener Punkte.
+Behalte die logischen Verknüpfungen des Originals bei. Gehe in dieser Reihenfolge vor:
+1. Erkenne zuerst Alternativgruppen. Eine Aufzählung "A, B oder C" bedeutet
+   "A oder B oder C" und bleibt genau EINE Anforderung, auch wenn sie verschiedene
+   Fähigkeiten nennt. Die Kommas erzeugen keine zusätzlichen Pflichtanforderungen.
+   Gib alle Alternativen samt zugehörigem Niveau und dem Wort "oder" gemeinsam
+   in einem einzigen text-Feld aus. Zerlege diese Gruppe niemals in Einträge.
+2. Zerlege dann mit "und" verbundene, unabhängig prüfbare Fähigkeiten und Sprachen
+   in einzelne Anforderungen. Das gilt auch für Grundkenntnisse und Kann-Kriterien.
+   "A und (B oder C)" ergibt zwei Einträge: "A" sowie "B oder C".
+   Jedes Teil behält sein eigenes Niveau und den muss/kann-Typ des Originals.
+   Insbesondere sind verschiedene Werkzeuge oder Fachkenntnisse getrennt prüfbar:
+   "Sicherer Umgang mit Werkzeug X und Werkzeug Y" ergibt "Sicherer Umgang mit
+   Werkzeug X" und "Sicherer Umgang mit Werkzeug Y".
+   "Grundkenntnisse in Fähigkeit X und Fähigkeit Y" ergibt "Grundkenntnisse in
+   Fähigkeit X" und "Grundkenntnisse in Fähigkeit Y". Ein gemeinsames Niveau gilt
+   für beide Teile; wiederhole es in jedem Eintrag. Das ist keine Alternativgruppe.
+   Beispiel: "Sehr gute Kenntnisse in Sprache X und gute Kenntnisse in Sprache Y"
+   ergibt "Sehr gute Kenntnisse in Sprache X" und "Gute Kenntnisse in Sprache Y".
+3. Prüfe die Abdeckung jedes relevanten Punkts vor der Ausgabe: kein Punkt fehlt,
+   keine unterschiedlichen Punkte sind zusammengefasst, keine getrennten Einträge
+   für Alternativen, keine zusammengefassten unabhängigen Und-Fähigkeiten.
+   Gleiche Fähigkeiten in unterschiedlichen Punkten bleiben mit ihren jeweiligen
+   eigenständigen Anforderungen erhalten; erfinde keine zusätzlichen Duplikate.
 Antworte nur mit einer JSON-Liste, ohne Markdown oder Erklärtext:
 [{"text": "kurzer, konkreter Anforderungstext", "typ": "muss"}]
 Erlaubte Werte für typ: "muss", "kann". Keine weiteren Felder.
-""".strip()
+""".strip())
     user_prompt = json.dumps({"dokumentdaten": job_ad_text}, ensure_ascii=False)
 
     def parse_requirements(response_text: str) -> list[dict[str, Any]]:
@@ -201,7 +267,7 @@ Erlaubte Werte für typ: "muss", "kann". Keine weiteren Felder.
 
     return _send_and_parse_with_retry(
         system_prompt, user_prompt, parse_requirements,
-        model=os.environ.get("MODEL_EXTRACT") or DEFAULT_MODEL, usage=usage,
+        model=os.environ.get("MODEL_EXTRACT") or DEFAULT_EXTRACT_MODEL, usage=usage,
         output_schema=EXTRACTION_SCHEMA,
     )
 
@@ -258,8 +324,21 @@ def assess_requirements(
 Bewerte jede mitgelieferte Anforderungs-ID genau einmal, ohne neue IDs zu erfinden.
 Nutze nur die zugeordneten Profil-Chunks. Erfinde keine Erfahrung oder Nachweise.
 Status: "erfuellt", "teilweise" oder "nicht_belegt".
-erfuellt: Die Anforderung ist vollständig belegt. teilweise: Nur ein Teil ist
-belegt. nicht_belegt: Es gibt keinen ausreichenden Nachweis.
+erfuellt: Die Anforderung ist auf dem geforderten oder einem höheren Niveau belegt.
+Bei Alternativen mit "oder" genügt der Beleg für eine einzige Alternative auf
+deren gefordertem Niveau für erfuellt; die anderen Alternativen sind dann optional.
+Lies das geforderte Niveau genau: "gut" ist nicht "sehr gut", "Grundkenntnisse"
+ist nicht "sicher". Verschärfe die Anforderung nicht. Ein Beleg, der das geforderte
+Niveau erreicht oder übertrifft, ergibt erfuellt, nicht teilweise.
+Ordne Sprachniveaus nach dem Europäischen Referenzrahmen für diese Bewertung ein:
+B1 = Grundkenntnisse, B2 = gut, C1 = sehr gut bzw. verhandlungssicher,
+C2 und Muttersprache = exzellent. Die Einordnung gilt für jede Sprache;
+ein höheres belegtes Niveau erfüllt auch eine niedrigere Anforderung.
+teilweise: Ein Beleg ist vorhanden, aber das geforderte Niveau oder ein Teil der
+Anforderung ist nachweislich nicht erreicht. Benenne diese konkrete Lücke in
+der Begründung; bloße Unsicherheit rechtfertigt keine Herabstufung.
+nicht_belegt: Es gibt keinen ausreichenden Nachweis. Ein vollständig fehlender
+Beleg ist kein Grund für teilweise.
 Bei erfuellt/teilweise ist ein Beleg erforderlich: ein zusammenhängender,
 wörtlicher Ausschnitt aus genau einem Chunk, ohne Auslassungspunkte oder
 zusammengesetzte Textstellen. Zitate enden an einem Satz-, Aufzählungs- oder
@@ -295,7 +374,7 @@ Keine weiteren Felder, keinen Score, Muss-Zähler oder Token-Verbrauch liefern.
 
     return _send_and_parse_with_retry(
         system_prompt, user_prompt, parse_assessment,
-        model=os.environ.get("MODEL_ASSESS") or DEFAULT_MODEL, usage=usage,
+        model=os.environ.get("MODEL_ASSESS") or DEFAULT_ASSESS_MODEL, usage=usage,
         output_schema=ASSESSMENT_SCHEMA,
     )
 
@@ -363,7 +442,10 @@ def _send_message(
         response = _get_client().messages.create(
             model=model,
             output_config=output_config,
-            thinking={"type": THINKING_TYPE},
+            # Sonnet 5.5 ersetzt disabled durch between_tools. Ohne Werkzeuge
+            # erfolgt damit ebenfalls kein Thinking vor der Antwort.
+            thinking={"type": "between_tools" if model.startswith("claude-sonnet-5-5")
+                      else THINKING_TYPE},
             max_tokens=MAX_TOKENS,
             timeout=API_TIMEOUT_SECONDS,
             system=system_prompt,

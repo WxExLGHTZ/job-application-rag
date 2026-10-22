@@ -200,9 +200,51 @@ def test_markdown_export_contains_complete_result_and_safe_text(result):
     assert "## R2: Projekte leiten" in markdown
     assert "S. 2" in markdown
     assert "<script>" not in markdown
-    assert r"\[Link\]\(" in markdown
+    assert r"\[Link](https://example.com)" in markdown
     assert r"\*\*Text\*\*" in markdown
     assert "Python und SQL" in markdown
+
+
+@pytest.mark.parametrize("text", [
+    "Python 3.11, CI-CD (Docker).", "C# und C++", "Array [0] und (Optionen)",
+    "snake_case und foo_bar_baz", "99.9 Prozent", "#ohne Leerzeichen",
+    "E-Mail: test@example.com", 'Ein "Zitat" und ein Apostroph: geht\'s.',
+])
+def test_markdown_preserves_ordinary_punctuation(text):
+    assert app._markdown_text(text, line_start=True) == text
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("# Überschrift", r"\# Überschrift"),
+    ("## Überschrift", r"\## Überschrift"),
+    ("- Eintrag", r"\- Eintrag"), ("+ Eintrag", r"\+ Eintrag"),
+    ("1. Eintrag", r"1\. Eintrag"), ("2) Eintrag", r"2\) Eintrag"),
+    ("---", r"\---"), ("- - -", r"\- - -"),
+    ("[Name]: URL", r"\[Name]: URL"),
+])
+def test_markdown_protects_actual_line_start_syntax(text, expected):
+    assert app._markdown_text(text, line_start=True) == expected
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("[Link](https://example.com)", r"\[Link](https://example.com)"),
+    ("![Bild](bild.png)", r"!\[Bild](bild.png)"),
+    ("[Link][Referenz]", r"\[Link][Referenz]"),
+    ("**Text**", r"\*\*Text\*\*"), ("__Text__", r"\_\_Text\_\_"),
+    ("~~Text~~", r"\~\~Text\~\~"), ("`Code`", r"\`Code\`"),
+])
+def test_markdown_prevents_unintended_inline_formatting(text, expected):
+    assert app._markdown_text(text) == expected
+
+
+def test_markdown_line_start_protection_respects_export_context(result):
+    result["summary"]["fazit"] = "# Zusammenfassung (kurz)."
+    result["requirements"][0]["begruendung"] = "- Gut belegt (S. 1)."
+    result["requirements"][0]["text"] = "- Sicherer Umgang (Python)."
+    markdown = app.result_markdown(result)
+    assert r"\# Zusammenfassung (kurz)." in markdown
+    assert r"\- Gut belegt (S. 1)." in markdown
+    assert "## R1: - Sicherer Umgang (Python)." in markdown
 
 
 def test_model_is_cached(monkeypatch):

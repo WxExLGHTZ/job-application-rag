@@ -112,7 +112,7 @@ def test_both_stages_send_transformed_schema_and_preserve_effort(monkeypatch):
         assert call["output_config"] == {
             "effort": "low", "format": {"type": "json_schema", "schema": schema},
         }
-        assert call["thinking"] == {"type": "disabled"}
+        assert call["thinking"] == {"type": "between_tools" if call is assess else "disabled"}
         assert call["timeout"] == 60
 
         def check(node):

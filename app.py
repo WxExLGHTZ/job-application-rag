@@ -121,11 +121,22 @@ def render_result_html(result: dict[str, Any]) -> str:
     return "".join(parts)
 
 
-def _markdown_text(value: Any) -> str:
-    # Dokumenttexte sollen im Export weder HTML noch Links/Markdown-Steuerzeichen ausführen.
+def _markdown_text(value: Any, *, line_start: bool = False) -> str:
+    """Erhalte Satzzeichen; schütze nur wirksame Markdown-Syntax und HTML."""
     text = " ".join(str(value).split())
-    text = re.sub(r"([\\`*_{}\[\]()#+.!|~>-])", r"\\\1", text)
-    return html.escape(text, quote=True)
+    # Backslashes nur vor Zeichen verdoppeln, die Markdown sonst entschärft.
+    text = re.sub(r"\\(?=[\\`*_{}\[\]()#+.!|~>\-])", r"\\\\", text)
+    text = re.sub(r"([`*])|(?<!\w)(_+)|(_+)(?!\w)|(~~+)",
+                  lambda match: "".join("\\" + char for char in match[0]), text)
+    # Eine geschützte öffnende Klammer reicht gegen Links und Bilder.
+    text = re.sub(r"\[(?=[^\]]*\]\s*(?:\(|\[))", r"\\[", text)
+    if line_start:
+        text = re.sub(r"^(#{1,6}(?=\s|$)|[-+](?=\s)|\[(?=[^\]]*\]:))",
+                      r"\\\1", text)
+        text = re.sub(r"^(\d{1,9})([.)])(?=\s)", r"\1\\\2", text)
+        if re.fullmatch(r"(?:-\s*){3,}", text):
+            text = "\\" + text
+    return html.escape(text, quote=False)
 
 
 def result_markdown(result: dict[str, Any]) -> str:
@@ -134,7 +145,7 @@ def result_markdown(result: dict[str, Any]) -> str:
         f"# {TITLE}", "", f"Modus: {MODES[result['mode']]}", "",
         f"**Score: {summary['score']}/100**",
         f"**Muss erfüllt: {_markdown_text(summary['muss_erfuellt'])}**", "",
-        _markdown_text(summary["fazit"]), "",
+        _markdown_text(summary["fazit"], line_start=True), "",
     ]
     for item in result["requirements"]:
         lines.extend([
@@ -146,7 +157,7 @@ def result_markdown(result: dict[str, Any]) -> str:
                 f"> *„{_markdown_text(item['beleg']['zitat'])}“*",
                 f"> S. {_markdown_text(item['beleg']['seite'])}", "",
             ])
-        lines.extend([_markdown_text(item["begruendung"]), ""])
+        lines.extend([_markdown_text(item["begruendung"], line_start=True), ""])
     return "\n".join(lines)
 
 
